@@ -1,7 +1,7 @@
 site_name: pybmpmon
 site_description: BGP Monitoring Protocol (BMP) listener and analyzer
 site_author: pybmpmon contributors
-repo_url: https://github.com/yourusername/pybmpmon
+repo_url: https://github.com/DigitalVortexLLC/pybmpmon
 repo_name: pybmpmon
 
 theme:

@@ -1,7 +1,7 @@
 # pybmpmon
 
-[![CI](https://github.com/yourusername/pybmpmon/workflows/CI/badge.svg)](https://github.com/yourusername/pybmpmon/actions)
-[![codecov](https://codecov.io/gh/yourusername/pybmpmon/branch/main/graph/badge.svg)](https://codecov.io/gh/yourusername/pybmpmon)
+[![CI](https://github.com/DigitalVortexLLC/pybmpmon/workflows/CI/badge.svg)](https://github.com/DigitalVortexLLC/pybmpmon/actions)
+[![codecov](https://codecov.io/gh/DigitalVortexLLC/pybmpmon/branch/main/graph/badge.svg)](https://codecov.io/gh/DigitalVortexLLC/pybmpmon)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -54,7 +54,7 @@ pybmpmon is a high-performance BMP monitoring station that provides:
 
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/pybmpmon.git
+git clone https://github.com/DigitalVortexLLC/pybmpmon.git
 cd pybmpmon
 
 # Copy configuration template
@@ -91,16 +91,16 @@ set routing-options bmp station pybmpmon station-port 11019
 set routing-options bmp station pybmpmon route-monitoring pre-policy
 ```
 
-See [documentation](https://yourusername.github.io/pybmpmon/) for more examples.
+See [documentation](https://DigitalVortexLLC.github.io/pybmpmon/) for more examples.
 
 ## Documentation
 
-Full documentation available at: **https://yourusername.github.io/pybmpmon/**
+Full documentation available at: **https://DigitalVortexLLC.github.io/pybmpmon/**
 
-- [Installation Guide](https://yourusername.github.io/pybmpmon/installation/) - Docker Compose and manual setup
-- [Configuration](https://yourusername.github.io/pybmpmon/configuration/) - All environment variables explained
-- [SQL Queries](https://yourusername.github.io/pybmpmon/queries/) - Example queries for route analysis
-- [Troubleshooting](https://yourusername.github.io/pybmpmon/troubleshooting/) - Common issues and solutions
+- [Installation Guide](https://DigitalVortexLLC.github.io/pybmpmon/installation/) - Docker Compose and manual setup
+- [Configuration](https://DigitalVortexLLC.github.io/pybmpmon/configuration/) - All environment variables explained
+- [SQL Queries](https://DigitalVortexLLC.github.io/pybmpmon/queries/) - Example queries for route analysis
+- [Troubleshooting](https://DigitalVortexLLC.github.io/pybmpmon/troubleshooting/) - Common issues and solutions
 
 ## Configuration
 
@@ -126,7 +126,7 @@ SENTRY_DSN=  # Leave empty to disable
 SENTRY_ENVIRONMENT=production
 ```
 
-See [Configuration Guide](https://yourusername.github.io/pybmpmon/configuration/) for all options.
+See [Configuration Guide](https://DigitalVortexLLC.github.io/pybmpmon/configuration/) for all options.
 
 ## Development
 
@@ -280,9 +280,9 @@ See [CLAUDE.md](CLAUDE.md) for detailed project specifications.
 
 ## Support
 
-- **Documentation**: https://yourusername.github.io/pybmpmon/
-- **Issues**: https://github.com/yourusername/pybmpmon/issues
-- **Discussions**: https://github.com/yourusername/pybmpmon/discussions
+- **Documentation**: https://DigitalVortexLLC.github.io/pybmpmon/
+- **Issues**: https://github.com/DigitalVortexLLC/pybmpmon/issues
+- **Discussions**: https://github.com/DigitalVortexLLC/pybmpmon/discussions
 
 ## Acknowledgments
 

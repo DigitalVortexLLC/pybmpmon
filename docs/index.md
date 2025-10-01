@@ -155,7 +155,7 @@ BMP Peer (Router) → TCP Socket (port 11019) → Asyncio Handler
 
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/pybmpmon.git
+git clone https://github.com/DigitalVortexLLC/pybmpmon.git
 cd pybmpmon
 
 # Copy example configuration
