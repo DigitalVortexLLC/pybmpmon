@@ -6,12 +6,13 @@ RUN pip install --no-cache-dir poetry==1.7.1
 
 WORKDIR /app
 
-# Copy dependency files
-COPY pyproject.toml ./
+# Copy dependency files and source code
+COPY pyproject.toml poetry.lock ./
+COPY src/ ./src/
 
-# Install dependencies only (no dev dependencies for production)
+# Install dependencies AND the package (remove --no-root)
 RUN poetry config virtualenvs.create false && \
-    poetry install --no-interaction --no-ansi --no-root --only main
+    poetry install --no-interaction --no-ansi --only main
 
 # Final stage
 FROM python:3.11-slim
@@ -21,11 +22,11 @@ RUN useradd -m -u 1000 -s /bin/bash bmpmon
 
 WORKDIR /app
 
-# Copy installed packages from builder
+# Copy installed packages from builder (including pybmpmon)
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
-# Copy application code
+# Copy application code (in case of any non-Python files)
 COPY src/ ./src/
 COPY .env.example ./.env
 
