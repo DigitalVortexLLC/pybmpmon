@@ -158,6 +158,7 @@ class BatchWriter:
                         "evpn_esi",
                         "mac_address",
                     ],
+                    format="text",  # Use text format for MACADDR type compatibility
                 )
 
             elapsed = (asyncio.get_event_loop().time() - start_time) * 1000
