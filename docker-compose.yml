@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: pybmpmon-db
+    environment:
+      POSTGRES_DB: ${DB_NAME:-bmpmon}
+      POSTGRES_USER: ${DB_USER:-bmpmon}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-bmpmon}
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./src/pybmpmon/database/migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-bmpmon}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  pybmpmon:
+    build: .
+    container_name: pybmpmon-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-bmpmon}
+      DB_USER: ${DB_USER:-bmpmon}
+      DB_PASSWORD: ${DB_PASSWORD:-bmpmon}
+      LISTEN_PORT: ${LISTEN_PORT:-11019}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+    ports:
+      - "${LISTEN_PORT:-11019}:11019"
+    volumes:
+      - ./src:/app/src
+    restart: unless-stopped
+    # To disable this service, set replicas to 0:
+    # deploy:
+    #   replicas: 0
+
+volumes:
+  postgres_data:

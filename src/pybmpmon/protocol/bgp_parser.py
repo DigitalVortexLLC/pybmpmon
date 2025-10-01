@@ -1,0 +1,517 @@
+"""BGP UPDATE message parser implementation."""
+
+from ipaddress import IPv4Address, IPv6Address
+
+from pybmpmon.protocol.bgp import (
+    ATTR_FLAG_EXTENDED_LENGTH,
+    BGP_HEADER_SIZE,
+    BGP_MARKER,
+    AddressFamilyIdentifier,
+    BGPASPathSegmentType,
+    BGPHeader,
+    BGPMessageType,
+    BGPParseError,
+    BGPPathAttribute,
+    BGPPathAttributeType,
+    BGPUpdateMessage,
+    ParsedBGPUpdate,
+    SubsequentAddressFamilyIdentifier,
+)
+from pybmpmon.utils.binary import read_bytes, read_uint8, read_uint16, read_uint32
+
+
+def parse_bgp_header(data: bytes) -> BGPHeader:
+    """
+    Parse BGP message header.
+
+    Args:
+        data: Binary data containing BGP header
+
+    Returns:
+        Parsed BGP header
+
+    Raises:
+        BGPParseError: If header is invalid
+    """
+    if len(data) < BGP_HEADER_SIZE:
+        raise BGPParseError(
+            f"Message too short: need {BGP_HEADER_SIZE} bytes, got {len(data)}"
+        )
+
+    marker = read_bytes(data, 0, 16)
+    if marker != BGP_MARKER:
+        raise BGPParseError("Invalid BGP marker")
+
+    length = read_uint16(data, 16)
+    msg_type_raw = read_uint8(data, 18)
+
+    try:
+        msg_type = BGPMessageType(msg_type_raw)
+    except ValueError as e:
+        raise BGPParseError(f"Invalid BGP message type: {msg_type_raw}") from e
+
+    return BGPHeader(marker=marker, length=length, msg_type=msg_type)
+
+
+def parse_bgp_update_structure(data: bytes) -> BGPUpdateMessage:
+    """
+    Parse BGP UPDATE message structure (RFC4271 Section 4.3).
+
+    Args:
+        data: Complete BGP UPDATE message including header
+
+    Returns:
+        Parsed BGP UPDATE message structure
+
+    Raises:
+        BGPParseError: If message is malformed
+    """
+    header = parse_bgp_header(data)
+
+    if header.msg_type != BGPMessageType.UPDATE:
+        raise BGPParseError(f"Expected UPDATE message, got {header.msg_type.name}")
+
+    if len(data) < header.length:
+        raise BGPParseError(
+            f"Incomplete message: expected {header.length} bytes, got {len(data)}"
+        )
+
+    offset = BGP_HEADER_SIZE
+
+    # Parse withdrawn routes length (2 bytes)
+    if offset + 2 > header.length:
+        raise BGPParseError("Message too short for withdrawn routes length")
+
+    withdrawn_routes_length = read_uint16(data, offset)
+    offset += 2
+
+    # Parse withdrawn routes
+    if offset + withdrawn_routes_length > header.length:
+        raise BGPParseError("Message too short for withdrawn routes")
+
+    withdrawn_routes = read_bytes(data, offset, withdrawn_routes_length)
+    offset += withdrawn_routes_length
+
+    # Parse total path attribute length (2 bytes)
+    if offset + 2 > header.length:
+        raise BGPParseError("Message too short for path attribute length")
+
+    total_path_attr_length = read_uint16(data, offset)
+    offset += 2
+
+    # Parse path attributes
+    path_attrs_end = offset + total_path_attr_length
+    if path_attrs_end > header.length:
+        raise BGPParseError("Message too short for path attributes")
+
+    path_attributes = parse_path_attributes(data, offset, path_attrs_end)
+    offset = path_attrs_end
+
+    # Remaining data is NLRI
+    nlri = read_bytes(data, offset, header.length - offset)
+
+    return BGPUpdateMessage(
+        withdrawn_routes_length=withdrawn_routes_length,
+        withdrawn_routes=withdrawn_routes,
+        total_path_attr_length=total_path_attr_length,
+        path_attributes=path_attributes,
+        nlri=nlri,
+    )
+
+
+def parse_path_attributes(data: bytes, start: int, end: int) -> list[BGPPathAttribute]:
+    """
+    Parse BGP path attributes.
+
+    Args:
+        data: Binary data containing path attributes
+        start: Starting offset
+        end: Ending offset (exclusive)
+
+    Returns:
+        List of parsed path attributes
+
+    Raises:
+        BGPParseError: If attributes are malformed
+    """
+    attributes: list[BGPPathAttribute] = []
+    offset = start
+
+    while offset < end:
+        # Need at least 3 bytes (flags, type, length)
+        if offset + 3 > end:
+            raise BGPParseError(f"Incomplete path attribute at offset {offset}")
+
+        flags = read_uint8(data, offset)
+        type_code_raw = read_uint8(data, offset + 1)
+
+        try:
+            type_code = BGPPathAttributeType(type_code_raw)
+        except ValueError:
+            # Unknown attribute type - create a placeholder
+            # We'll store the raw value instead of failing
+            type_code = type_code_raw  # type: ignore[assignment]
+
+        # Check if extended length flag is set
+        if flags & ATTR_FLAG_EXTENDED_LENGTH:
+            if offset + 4 > end:
+                raise BGPParseError("Incomplete extended length attribute")
+            length = read_uint16(data, offset + 2)
+            value_offset = offset + 4
+        else:
+            length = read_uint8(data, offset + 2)
+            value_offset = offset + 3
+
+        if value_offset + length > end:
+            raise BGPParseError("Attribute value exceeds message bounds")
+
+        value = read_bytes(data, value_offset, length)
+
+        attributes.append(
+            BGPPathAttribute(
+                flags=flags, type_code=type_code, length=length, value=value
+            )
+        )
+
+        offset = value_offset + length
+
+    return attributes
+
+
+def parse_ipv4_prefix(data: bytes, offset: int) -> tuple[str, int]:
+    """
+    Parse IPv4 prefix in BGP format (length + prefix bytes).
+
+    Args:
+        data: Binary data
+        offset: Starting offset
+
+    Returns:
+        Tuple of (prefix_string, bytes_consumed)
+
+    Raises:
+        BGPParseError: If prefix is malformed
+    """
+    if offset >= len(data):
+        raise BGPParseError("No data for IPv4 prefix")
+
+    prefix_len = read_uint8(data, offset)
+    if prefix_len > 32:
+        raise BGPParseError(f"Invalid IPv4 prefix length: {prefix_len}")
+
+    # Calculate number of bytes needed for prefix
+    prefix_bytes = (prefix_len + 7) // 8
+    if offset + 1 + prefix_bytes > len(data):
+        raise BGPParseError("Incomplete IPv4 prefix")
+
+    # Read prefix bytes and pad to 4 bytes
+    prefix_data = read_bytes(data, offset + 1, prefix_bytes)
+    prefix_data = prefix_data + b"\x00" * (4 - prefix_bytes)
+
+    prefix_ip = str(IPv4Address(prefix_data))
+    return f"{prefix_ip}/{prefix_len}", 1 + prefix_bytes
+
+
+def parse_ipv6_prefix(data: bytes, offset: int) -> tuple[str, int]:
+    """
+    Parse IPv6 prefix in BGP format (length + prefix bytes).
+
+    Args:
+        data: Binary data
+        offset: Starting offset
+
+    Returns:
+        Tuple of (prefix_string, bytes_consumed)
+
+    Raises:
+        BGPParseError: If prefix is malformed
+    """
+    if offset >= len(data):
+        raise BGPParseError("No data for IPv6 prefix")
+
+    prefix_len = read_uint8(data, offset)
+    if prefix_len > 128:
+        raise BGPParseError(f"Invalid IPv6 prefix length: {prefix_len}")
+
+    # Calculate number of bytes needed for prefix
+    prefix_bytes = (prefix_len + 7) // 8
+    if offset + 1 + prefix_bytes > len(data):
+        raise BGPParseError("Incomplete IPv6 prefix")
+
+    # Read prefix bytes and pad to 16 bytes
+    prefix_data = read_bytes(data, offset + 1, prefix_bytes)
+    prefix_data = prefix_data + b"\x00" * (16 - prefix_bytes)
+
+    prefix_ip = str(IPv6Address(prefix_data))
+    return f"{prefix_ip}/{prefix_len}", 1 + prefix_bytes
+
+
+def parse_as_path(value: bytes) -> list[int]:
+    """
+    Parse AS_PATH attribute.
+
+    Args:
+        value: AS_PATH attribute value
+
+    Returns:
+        List of AS numbers in path order
+
+    Raises:
+        BGPParseError: If AS_PATH is malformed
+    """
+    as_path: list[int] = []
+    offset = 0
+
+    while offset < len(value):
+        if offset + 2 > len(value):
+            raise BGPParseError("Incomplete AS_PATH segment")
+
+        segment_type = read_uint8(value, offset)
+        segment_length = read_uint8(value, offset + 1)
+        offset += 2
+
+        # Each AS number is 2 bytes (or 4 bytes for AS4_PATH)
+        # For now, assume 2-byte AS numbers (legacy format)
+        as_size = 2
+        if offset + (segment_length * as_size) > len(value):
+            raise BGPParseError("Incomplete AS_PATH segment data")
+
+        for _ in range(segment_length):
+            as_num = read_uint16(value, offset)
+            if segment_type == BGPASPathSegmentType.AS_SEQUENCE:
+                as_path.append(as_num)
+            elif segment_type == BGPASPathSegmentType.AS_SET:
+                # For AS_SET, we still add to path but note it's a set
+                as_path.append(as_num)
+            offset += as_size
+
+    return as_path
+
+
+def parse_communities(value: bytes) -> list[str]:
+    """
+    Parse COMMUNITIES attribute.
+
+    Args:
+        value: COMMUNITIES attribute value
+
+    Returns:
+        List of community strings in "AS:value" format
+
+    Raises:
+        BGPParseError: If COMMUNITIES is malformed
+    """
+    if len(value) % 4 != 0:
+        raise BGPParseError("Invalid COMMUNITIES length (must be multiple of 4)")
+
+    communities: list[str] = []
+    offset = 0
+
+    while offset < len(value):
+        as_num = read_uint16(value, offset)
+        comm_value = read_uint16(value, offset + 2)
+        communities.append(f"{as_num}:{comm_value}")
+        offset += 4
+
+    return communities
+
+
+def parse_mp_reach_nlri(value: bytes) -> tuple[int, int, str | None, list[str]]:
+    """
+    Parse MP_REACH_NLRI attribute (RFC4760).
+
+    Args:
+        value: MP_REACH_NLRI attribute value
+
+    Returns:
+        Tuple of (AFI, SAFI, next_hop, prefixes)
+
+    Raises:
+        BGPParseError: If attribute is malformed
+    """
+    if len(value) < 5:
+        raise BGPParseError("MP_REACH_NLRI too short")
+
+    afi = read_uint16(value, 0)
+    safi = read_uint8(value, 2)
+    next_hop_len = read_uint8(value, 3)
+
+    if len(value) < 4 + next_hop_len + 1:
+        raise BGPParseError("MP_REACH_NLRI incomplete")
+
+    # Parse next hop
+    next_hop_data = read_bytes(value, 4, next_hop_len)
+    next_hop: str | None = None
+
+    if afi == AddressFamilyIdentifier.IPV4:
+        if next_hop_len >= 4:
+            next_hop = str(IPv4Address(next_hop_data[:4]))
+    elif afi == AddressFamilyIdentifier.IPV6:
+        if next_hop_len >= 16:
+            next_hop = str(IPv6Address(next_hop_data[:16]))
+
+    # Reserved byte
+    offset = 4 + next_hop_len + 1
+
+    # Parse NLRI based on AFI/SAFI
+    prefixes: list[str] = []
+
+    if (
+        afi == AddressFamilyIdentifier.IPV4
+        and safi == SubsequentAddressFamilyIdentifier.UNICAST
+    ):
+        while offset < len(value):
+            prefix, consumed = parse_ipv4_prefix(value, offset)
+            prefixes.append(prefix)
+            offset += consumed
+    elif (
+        afi == AddressFamilyIdentifier.IPV6
+        and safi == SubsequentAddressFamilyIdentifier.UNICAST
+    ):
+        while offset < len(value):
+            prefix, consumed = parse_ipv6_prefix(value, offset)
+            prefixes.append(prefix)
+            offset += consumed
+
+    return afi, safi, next_hop, prefixes
+
+
+def parse_mp_unreach_nlri(value: bytes) -> tuple[int, int, list[str]]:
+    """
+    Parse MP_UNREACH_NLRI attribute (RFC4760).
+
+    Args:
+        value: MP_UNREACH_NLRI attribute value
+
+    Returns:
+        Tuple of (AFI, SAFI, withdrawn_prefixes)
+
+    Raises:
+        BGPParseError: If attribute is malformed
+    """
+    if len(value) < 3:
+        raise BGPParseError("MP_UNREACH_NLRI too short")
+
+    afi = read_uint16(value, 0)
+    safi = read_uint8(value, 2)
+    offset = 3
+
+    # Parse withdrawn routes based on AFI/SAFI
+    prefixes: list[str] = []
+
+    if (
+        afi == AddressFamilyIdentifier.IPV4
+        and safi == SubsequentAddressFamilyIdentifier.UNICAST
+    ):
+        while offset < len(value):
+            prefix, consumed = parse_ipv4_prefix(value, offset)
+            prefixes.append(prefix)
+            offset += consumed
+    elif (
+        afi == AddressFamilyIdentifier.IPV6
+        and safi == SubsequentAddressFamilyIdentifier.UNICAST
+    ):
+        while offset < len(value):
+            prefix, consumed = parse_ipv6_prefix(value, offset)
+            prefixes.append(prefix)
+            offset += consumed
+
+    return afi, safi, prefixes
+
+
+def parse_bgp_update(data: bytes) -> ParsedBGPUpdate:
+    """
+    Parse complete BGP UPDATE message and extract route information.
+
+    Args:
+        data: Complete BGP UPDATE message including header
+
+    Returns:
+        Parsed BGP UPDATE with all route information
+
+    Raises:
+        BGPParseError: If message cannot be parsed
+    """
+    update = parse_bgp_update_structure(data)
+
+    # Initialize parsed data
+    afi: int | None = None
+    safi: int | None = None
+    prefixes: list[str] = []
+    withdrawn_prefixes: list[str] = []
+    origin: int | None = None
+    as_path: list[int] | None = None
+    next_hop: str | None = None
+    med: int | None = None
+    local_pref: int | None = None
+    communities: list[str] | None = None
+    evpn_route_type: int | None = None
+    evpn_rd: str | None = None
+    evpn_esi: str | None = None
+    mac_address: str | None = None
+
+    # Parse withdrawn routes (IPv4 only in standard UPDATE)
+    offset = 0
+    while offset < len(update.withdrawn_routes):
+        prefix, consumed = parse_ipv4_prefix(update.withdrawn_routes, offset)
+        withdrawn_prefixes.append(prefix)
+        offset += consumed
+
+    # Parse path attributes
+    for attr in update.path_attributes:
+        try:
+            if attr.type_code == BGPPathAttributeType.ORIGIN:
+                origin = read_uint8(attr.value, 0)
+            elif attr.type_code == BGPPathAttributeType.AS_PATH:
+                as_path = parse_as_path(attr.value)
+            elif attr.type_code == BGPPathAttributeType.NEXT_HOP:
+                if len(attr.value) >= 4:
+                    next_hop = str(IPv4Address(attr.value[:4]))
+            elif attr.type_code == BGPPathAttributeType.MULTI_EXIT_DISC:
+                med = read_uint32(attr.value, 0)
+            elif attr.type_code == BGPPathAttributeType.LOCAL_PREF:
+                local_pref = read_uint32(attr.value, 0)
+            elif attr.type_code == BGPPathAttributeType.COMMUNITIES:
+                communities = parse_communities(attr.value)
+            elif attr.type_code == BGPPathAttributeType.MP_REACH_NLRI:
+                afi, safi, mp_next_hop, mp_prefixes = parse_mp_reach_nlri(attr.value)
+                if mp_next_hop:
+                    next_hop = mp_next_hop
+                prefixes.extend(mp_prefixes)
+            elif attr.type_code == BGPPathAttributeType.MP_UNREACH_NLRI:
+                afi, safi, mp_withdrawn = parse_mp_unreach_nlri(attr.value)
+                withdrawn_prefixes.extend(mp_withdrawn)
+        except Exception:
+            # Skip malformed attributes
+            continue
+
+    # Parse NLRI (IPv4 unicast routes in standard UPDATE)
+    if len(update.nlri) > 0:
+        afi = AddressFamilyIdentifier.IPV4
+        safi = SubsequentAddressFamilyIdentifier.UNICAST
+        offset = 0
+        while offset < len(update.nlri):
+            prefix, consumed = parse_ipv4_prefix(update.nlri, offset)
+            prefixes.append(prefix)
+            offset += consumed
+
+    # Determine if this is a withdrawal
+    is_withdrawal = len(prefixes) == 0 and len(withdrawn_prefixes) > 0
+
+    return ParsedBGPUpdate(
+        afi=afi,
+        safi=safi,
+        prefixes=prefixes,
+        withdrawn_prefixes=withdrawn_prefixes,
+        is_withdrawal=is_withdrawal,
+        origin=origin,
+        as_path=as_path,
+        next_hop=next_hop,
+        med=med,
+        local_pref=local_pref,
+        communities=communities,
+        evpn_route_type=evpn_route_type,
+        evpn_rd=evpn_rd,
+        evpn_esi=evpn_esi,
+        mac_address=mac_address,
+    )
