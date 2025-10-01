@@ -13,8 +13,8 @@ WORKDIR /app
 # Install Poetry
 RUN pip install --no-cache-dir poetry==1.7.1
 
-# Copy dependency files
-COPY pyproject.toml poetry.lock ./
+# Copy dependency files and README (required by pyproject.toml)
+COPY pyproject.toml poetry.lock README.md ./
 
 # Install dependencies (as root for system packages)
 RUN poetry config virtualenvs.create false && \
