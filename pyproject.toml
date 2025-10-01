@@ -11,7 +11,7 @@ python = "^3.11"
 asyncpg = "^0.30.0"
 pydantic = "^2.0"
 pydantic-settings = "^2.0"
-structlog = "^24.0"
+structlog = "^25.4"
 sentry-sdk = "^1.40"
 python-dotenv = "^1.0"
 
