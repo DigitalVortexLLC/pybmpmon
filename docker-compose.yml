@@ -27,18 +27,26 @@ services:
       postgres:
         condition: service_healthy
     environment:
+      # Database configuration
       DB_HOST: postgres
       DB_PORT: 5432
       DB_NAME: ${DB_NAME:-bmpmon}
       DB_USER: ${DB_USER:-bmpmon}
       DB_PASSWORD: ${DB_PASSWORD:-bmpmon}
-      LISTEN_PORT: ${LISTEN_PORT:-11019}
+      # BMP Listener configuration
+      BMP_LISTEN_HOST: 0.0.0.0
+      BMP_LISTEN_PORT: ${BMP_LISTEN_PORT:-11019}
+      # Logging
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Sentry (optional)
       SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
+      SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0.1}
     ports:
-      - "${LISTEN_PORT:-11019}:11019"
-    volumes:
-      - ./src:/app/src
+      - "${BMP_LISTEN_PORT:-11019}:11019"
+    # Volume mount disabled for production - uncommment for development only
+    # volumes:
+    #   - ./src:/app/src
     restart: unless-stopped
     # To disable this service, set replicas to 0:
     # deploy:
