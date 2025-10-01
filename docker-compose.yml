@@ -43,7 +43,7 @@ services:
       SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
       SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0.1}
     ports:
-      - "${BMP_LISTEN_PORT:-11019}:11019"
+      - "${BMP_LISTEN_PORT:-11019}:${BMP_LISTEN_PORT:-11019}"
     # Volume mount disabled for production - uncommment for development only
     # volumes:
     #   - ./src:/app/src
