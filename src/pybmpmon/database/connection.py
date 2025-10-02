@@ -7,10 +7,12 @@ from pybmpmon.monitoring.logger import get_logger
 logger = get_logger(__name__)
 
 
-def _encode_macaddr(value: str | None) -> bytes | None:
+def _encode_macaddr(value: str | bytes | None) -> bytes | None:
     """Encode MAC address string to binary format for PostgreSQL MACADDR type."""
     if value is None:
         return None
+    if isinstance(value, bytes):
+        return value  # Already encoded
     # PostgreSQL expects MAC address as 6 bytes
     # Convert "08:00:2b:01:02:03" to bytes
     parts = value.replace("-", ":").split(":")
