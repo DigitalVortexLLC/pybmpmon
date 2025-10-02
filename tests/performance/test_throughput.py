@@ -19,7 +19,7 @@ async def test_batch_writer_throughput():
 
     # Create mock pool that doesn't actually write to database
     class MockConnection:
-        async def executemany(self, query, records):
+        async def copy_records_to_table(self, table, records, columns):
             # Simulate some processing time
             await asyncio.sleep(0.001)  # 1ms per batch
 
@@ -97,7 +97,7 @@ async def test_batch_writer_timeout_flush():
         def __init__(self, pool):
             self.pool = pool
 
-        async def executemany(self, query, records):
+        async def copy_records_to_table(self, table, records, columns):
             self.pool.flush_count += 1
 
     class MockPoolContext:
@@ -153,7 +153,7 @@ async def test_batch_writer_size_flush():
         def __init__(self, pool):
             self.pool = pool
 
-        async def executemany(self, query, records):
+        async def copy_records_to_table(self, table, records, columns):
             self.pool.flush_count += 1
 
     class MockPoolContext:

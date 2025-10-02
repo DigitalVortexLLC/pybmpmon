@@ -699,7 +699,7 @@ class TestEVPNEndToEnd:
                 row = await conn.fetchrow(
                     """
                     SELECT * FROM route_updates
-                    WHERE mac_address = $1::macaddr
+                    WHERE mac_address = $1
                     """,
                     "aa:bb:cc:dd:ee:ff",
                 )
@@ -763,7 +763,7 @@ class TestEVPNEndToEnd:
                 row = await conn.fetchrow(
                     """
                     SELECT * FROM route_updates
-                    WHERE mac_address = $1::macaddr
+                    WHERE mac_address = $1
                       AND evpn_rd = $2
                     """,
                     "11:22:33:44:55:66",
@@ -837,7 +837,7 @@ class TestEVPNEndToEnd:
                 row = await conn.fetchrow(
                     """
                     SELECT * FROM route_updates
-                    WHERE mac_address = $1::macaddr
+                    WHERE mac_address = $1
                     """,
                     "aa:bb:cc:dd:ee:05",
                 )
