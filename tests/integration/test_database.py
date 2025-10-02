@@ -1,10 +1,11 @@
 """Integration tests for database operations using testcontainers."""
 
 import asyncio
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from pybmpmon.database.batch_writer import BatchWriter
 from pybmpmon.database.connection import DatabasePool
 from pybmpmon.database.operations import (
     get_all_active_peers,
@@ -401,3 +402,144 @@ class TestDatabasePool:
         """Test pool fetchval method."""
         value = await db_pool.fetchval("SELECT 42")
         assert value == 42
+
+
+class TestBatchWriterEVPN:
+    """Test BatchWriter with EVPN routes containing MAC addresses."""
+
+    async def test_batch_writer_evpn_mac_addresses(self, db_pool, clean_db):
+        """
+        Test that BatchWriter correctly handles EVPN routes with MAC addresses.
+
+        This test ensures the MACADDR codec works correctly with COPY operations,
+        preventing regressions like "no binary format encoder for type macaddr".
+        """
+        pool = db_pool.get_pool()
+        batch_writer = BatchWriter(pool, batch_size=10, batch_timeout=0.5)
+        await batch_writer.start()
+
+        try:
+            # Add 25 EVPN routes with different MAC addresses
+            for i in range(25):
+                route = RouteUpdate(
+                    time=datetime.now(UTC),
+                    bmp_peer_ip="192.0.2.1",
+                    bmp_peer_asn=65001,
+                    bgp_peer_ip="192.0.2.2",
+                    bgp_peer_asn=65002,
+                    family=FAMILY_EVPN,
+                    prefix=f"10.0.{i}.0/24",
+                    next_hop="192.0.2.3",
+                    is_withdrawn=False,
+                    evpn_route_type=2,  # MAC/IP Advertisement
+                    evpn_rd=f"65001:{i}",
+                    evpn_esi=f"00:11:22:33:44:55:66:77:88:{i:02x}",
+                    mac_address=f"aa:bb:cc:dd:ee:{i:02x}",
+                )
+                await batch_writer.add_route(route)
+
+            # Force flush
+            await batch_writer.flush()
+
+            # Verify routes were inserted
+            count = await get_route_count_by_family(pool, FAMILY_EVPN)
+            assert count == 25
+
+            # Verify MAC addresses are stored correctly
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT evpn_rd, mac_address
+                    FROM route_updates
+                    WHERE family = $1
+                    ORDER BY evpn_rd
+                    LIMIT 5
+                    """,
+                    FAMILY_EVPN,
+                )
+
+                # Check first 5 MAC addresses
+                expected_macs = [
+                    ("65001:0", "aa:bb:cc:dd:ee:00"),
+                    ("65001:1", "aa:bb:cc:dd:ee:01"),
+                    ("65001:10", "aa:bb:cc:dd:ee:0a"),
+                    ("65001:11", "aa:bb:cc:dd:ee:0b"),
+                    ("65001:12", "aa:bb:cc:dd:ee:0c"),
+                ]
+
+                for row, (expected_rd, expected_mac) in zip(
+                    rows, expected_macs, strict=False
+                ):
+                    assert row["evpn_rd"] == expected_rd
+                    assert row["mac_address"] == expected_mac
+
+        finally:
+            await batch_writer.stop()
+
+    async def test_batch_writer_mixed_routes_with_mac(self, db_pool, clean_db):
+        """Test BatchWriter with mixed route types including EVPN with MAC addresses."""
+        pool = db_pool.get_pool()
+        batch_writer = BatchWriter(pool, batch_size=20, batch_timeout=0.5)
+        await batch_writer.start()
+
+        try:
+            # Add IPv4 routes (no MAC)
+            for i in range(10):
+                route = RouteUpdate(
+                    time=datetime.now(UTC),
+                    bmp_peer_ip="192.0.2.1",
+                    bmp_peer_asn=65001,
+                    bgp_peer_ip="192.0.2.2",
+                    bgp_peer_asn=65002,
+                    family=FAMILY_IPV4_UNICAST,
+                    prefix=f"10.{i}.0.0/16",
+                    next_hop="192.0.2.3",
+                    is_withdrawn=False,
+                )
+                await batch_writer.add_route(route)
+
+            # Add EVPN routes (with MAC)
+            for i in range(10):
+                route = RouteUpdate(
+                    time=datetime.now(UTC),
+                    bmp_peer_ip="192.0.2.1",
+                    bmp_peer_asn=65001,
+                    bgp_peer_ip="192.0.2.2",
+                    bgp_peer_asn=65002,
+                    family=FAMILY_EVPN,
+                    prefix=f"172.16.{i}.0/24",
+                    next_hop="192.0.2.3",
+                    is_withdrawn=False,
+                    evpn_route_type=2,
+                    evpn_rd=f"65001:100{i}",
+                    mac_address=f"bb:cc:dd:ee:ff:{i:02x}",
+                )
+                await batch_writer.add_route(route)
+
+            await batch_writer.flush()
+
+            # Verify counts
+            ipv4_count = await get_route_count_by_family(pool, FAMILY_IPV4_UNICAST)
+            evpn_count = await get_route_count_by_family(pool, FAMILY_EVPN)
+
+            assert ipv4_count == 10
+            assert evpn_count == 10
+
+            # Verify EVPN routes have MAC addresses, IPv4 routes don't
+            async with pool.acquire() as conn:
+                evpn_macs = await conn.fetch(
+                    "SELECT mac_address FROM route_updates WHERE family = $1",
+                    FAMILY_EVPN,
+                )
+                ipv4_macs = await conn.fetch(
+                    "SELECT mac_address FROM route_updates WHERE family = $1",
+                    FAMILY_IPV4_UNICAST,
+                )
+
+                # All EVPN routes should have MAC addresses
+                assert all(row["mac_address"] is not None for row in evpn_macs)
+                # All IPv4 routes should have NULL MAC addresses
+                assert all(row["mac_address"] is None for row in ipv4_macs)
+
+        finally:
+            await batch_writer.stop()
