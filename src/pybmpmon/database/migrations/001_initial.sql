@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS route_updates (
     evpn_route_type INTEGER,
     evpn_rd TEXT,
     evpn_esi TEXT,
-    mac_address MACADDR
+    mac_address TEXT  -- Changed from MACADDR to TEXT for asyncpg COPY compatibility
 );
 
 -- Peer events table (will be converted to hypertable)
