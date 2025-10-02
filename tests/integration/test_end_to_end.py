@@ -22,29 +22,23 @@ from pybmpmon.monitoring.stats import StatisticsCollector
 from testcontainers.postgres import PostgresContainer
 
 
-@pytest.fixture(scope="session")
-def event_loop():
-    """Create event loop for async tests."""
-    loop = asyncio.get_event_loop_policy().new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest.fixture(scope="session")
-async def postgres_container():
+@pytest.fixture
+def postgres_container():
     """Start PostgreSQL/TimescaleDB container for tests."""
     with PostgresContainer("timescale/timescaledb:latest-pg16") as postgres:
-        await asyncio.sleep(2)
         yield postgres
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 async def db_pool(postgres_container):
     """Create database pool and run migrations."""
     import re
 
     connection_url = postgres_container.get_connection_url()
-    match = re.match(r"postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)", connection_url)
+    # Handle both postgresql:// and postgresql+psycopg2:// URLs
+    match = re.match(
+        r"postgresql(?:\+\w+)?://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)", connection_url
+    )
     if not match:
         raise ValueError(f"Invalid connection URL: {connection_url}")
 
@@ -298,8 +292,8 @@ class TestEndToEndFlow:
             # Wait for processing
             await asyncio.sleep(0.5)
 
-            # Verify peer in database
-            peer = await get_bmp_peer(db_pool.get_pool(), "192.0.2.1")
+            # Verify peer in database (BMP peer is the TCP connection IP)
+            peer = await get_bmp_peer(db_pool.get_pool(), "127.0.0.1")
             assert peer is not None
             assert peer.is_active is True
 
@@ -314,6 +308,9 @@ class TestEndToEndFlow:
             writer.write(route_msg)
             await writer.drain()
 
+            # Wait for listener to process the message and add to batch
+            await asyncio.sleep(1.0)
+
             # Force batch flush
             await batch_writer.flush()
             await asyncio.sleep(0.5)
@@ -323,7 +320,7 @@ class TestEndToEndFlow:
             assert count == 1
 
             count_by_peer = await get_route_count_by_peer(
-                db_pool.get_pool(), "192.0.2.1"
+                db_pool.get_pool(), "127.0.0.1"
             )
             assert count_by_peer == 1
 
@@ -335,7 +332,7 @@ class TestEndToEndFlow:
             await asyncio.sleep(0.5)
 
             # Verify peer marked inactive
-            peer = await get_bmp_peer(db_pool.get_pool(), "192.0.2.1")
+            peer = await get_bmp_peer(db_pool.get_pool(), "127.0.0.1")
             assert peer is not None
             assert peer.is_active is False
 
@@ -375,12 +372,15 @@ class TestEndToEndFlow:
 
             await writer.drain()
 
-            # Force flush and wait
-            await batch_writer.flush()
+            # Wait for listener to process all messages and add to batch
             await asyncio.sleep(1.0)
 
+            # Force flush
+            await batch_writer.flush()
+            await asyncio.sleep(0.5)
+
             # Verify all 50 routes in database
-            count = await get_route_count_by_peer(db_pool.get_pool(), "192.0.2.10")
+            count = await get_route_count_by_peer(db_pool.get_pool(), "127.0.0.1")
             assert count == 50
 
             count_ipv4 = await get_route_count_by_family(
@@ -409,8 +409,8 @@ class TestEndToEndFlow:
             await writer.drain()
             await asyncio.sleep(0.3)
 
-            # Verify peer is active
-            peer = await get_bmp_peer(db_pool.get_pool(), "192.0.2.20")
+            # Verify peer is active (BMP peer is the TCP connection IP)
+            peer = await get_bmp_peer(db_pool.get_pool(), "127.0.0.1")
             assert peer is not None
             assert peer.is_active is True
 
@@ -426,11 +426,15 @@ class TestEndToEndFlow:
                 writer.write(route_msg)
 
             await writer.drain()
+
+            # Wait for listener to process all messages and add to batch
+            await asyncio.sleep(1.0)
+
             await batch_writer.flush()
             await asyncio.sleep(0.5)
 
             # Verify routes
-            count = await get_route_count_by_peer(db_pool.get_pool(), "192.0.2.20")
+            count = await get_route_count_by_peer(db_pool.get_pool(), "127.0.0.1")
             assert count == 10
 
             # Phase 3: Peer Down
@@ -440,13 +444,406 @@ class TestEndToEndFlow:
             await asyncio.sleep(0.3)
 
             # Verify peer is inactive
-            peer = await get_bmp_peer(db_pool.get_pool(), "192.0.2.20")
+            peer = await get_bmp_peer(db_pool.get_pool(), "127.0.0.1")
             assert peer is not None
             assert peer.is_active is False
 
             # Routes should still be in database (historical data)
-            count = await get_route_count_by_peer(db_pool.get_pool(), "192.0.2.20")
+            count = await get_route_count_by_peer(db_pool.get_pool(), "127.0.0.1")
             assert count == 10
+
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+
+def build_evpn_type2_nlri(
+    rd: str, esi: str, mac_address: str, ip_address: str | None = None
+) -> bytes:
+    """
+    Build EVPN Type 2 (MAC/IP Advertisement) NLRI.
+
+    Args:
+        rd: Route Distinguisher in format "asn:num" (e.g., "65001:100")
+        esi: Ethernet Segment Identifier (10 bytes as hex string with colons)
+        mac_address: MAC address (6 bytes as hex string with colons)
+        ip_address: Optional IP address (IPv4 or IPv6)
+
+    Returns:
+        Complete EVPN Type 2 NLRI bytes
+    """
+    data = bytearray()
+
+    # Route Type (1 byte) = 2 for MAC/IP Advertisement
+    data.extend(b"\x02")
+
+    # Length (1 byte) - will calculate and insert later
+    length_offset = len(data)
+    data.extend(b"\x00")  # Placeholder
+
+    # Route Distinguisher (8 bytes) - Type 0: 2-byte ASN : 4-byte number
+    rd_parts = rd.split(":")
+    rd_asn = int(rd_parts[0])
+    rd_num = int(rd_parts[1])
+    data.extend(b"\x00\x00")  # RD Type = 0
+    data.extend(rd_asn.to_bytes(2, "big"))
+    data.extend(rd_num.to_bytes(4, "big"))
+
+    # Ethernet Segment Identifier (10 bytes)
+    esi_parts = esi.split(":")
+    for part in esi_parts:
+        data.extend(bytes([int(part, 16)]))
+
+    # Ethernet Tag ID (4 bytes) - 0 for single-homed
+    data.extend(b"\x00\x00\x00\x00")
+
+    # MAC Address Length (1 byte) = 48 bits
+    data.extend(b"\x30")
+
+    # MAC Address (6 bytes)
+    mac_parts = mac_address.split(":")
+    for part in mac_parts:
+        data.extend(bytes([int(part, 16)]))
+
+    # IP Address Length (1 byte)
+    if ip_address:
+        if ":" in ip_address:
+            # IPv6
+            data.extend(b"\x80")  # 128 bits
+            # For simplicity in tests, only handle simple IPv6 addresses
+            import ipaddress
+
+            ip_obj = ipaddress.IPv6Address(ip_address)
+            data.extend(ip_obj.packed)
+        else:
+            # IPv4
+            data.extend(b"\x20")  # 32 bits
+            ip_parts = ip_address.split(".")
+            for part in ip_parts:
+                data.extend(bytes([int(part)]))
+    else:
+        # No IP address
+        data.extend(b"\x00")
+
+    # MPLS Label (3 bytes) - 0 for no label
+    data.extend(b"\x00\x00\x00")
+
+    # Update length field (everything after route type and length)
+    nlri_length = len(data) - 2  # Subtract route type and length bytes
+    data[length_offset] = nlri_length
+
+    return bytes(data)
+
+
+def build_bgp_update_with_evpn(
+    rd: str,
+    esi: str,
+    mac_address: str,
+    ip_address: str | None,
+    next_hop: str,
+    as_path: list[int],
+) -> bytes:
+    """Build BGP UPDATE with EVPN Type 2 route in MP_REACH_NLRI."""
+    data = bytearray()
+
+    # BGP header
+    data.extend(b"\xff" * 16)  # Marker
+    data.extend(b"\x00\x00")  # Length (will update)
+    data.extend(b"\x02")  # Type = UPDATE
+
+    # No withdrawn routes
+    data.extend(b"\x00\x00")
+
+    # Path attributes
+    path_attrs = bytearray()
+
+    # ORIGIN (IGP)
+    path_attrs.extend(b"\x40\x01\x01\x00")
+
+    # AS_PATH
+    as_path_data = bytearray()
+    as_path_data.extend(b"\x02")  # AS_SEQUENCE
+    as_path_data.extend(bytes([len(as_path)]))
+    for asn in as_path:
+        as_path_data.extend(asn.to_bytes(2, "big"))
+
+    path_attrs.extend(b"\x40\x02")
+    path_attrs.extend(bytes([len(as_path_data)]))
+    path_attrs.extend(as_path_data)
+
+    # MP_REACH_NLRI with EVPN
+    mp_reach = bytearray()
+    mp_reach.extend(b"\x00\x19")  # AFI = L2VPN (25)
+    mp_reach.extend(b"\x46")  # SAFI = EVPN (70)
+
+    # Next hop length and next hop
+    if ":" in next_hop:
+        # IPv6 next hop
+        mp_reach.extend(b"\x10")  # 16 bytes
+        import ipaddress
+
+        nh_obj = ipaddress.IPv6Address(next_hop)
+        mp_reach.extend(nh_obj.packed)
+    else:
+        # IPv4 next hop
+        mp_reach.extend(b"\x04")  # 4 bytes
+        nh_octets = [int(x) for x in next_hop.split(".")]
+        mp_reach.extend(bytes(nh_octets))
+
+    mp_reach.extend(b"\x00")  # Reserved
+
+    # EVPN NLRI
+    evpn_nlri = build_evpn_type2_nlri(rd, esi, mac_address, ip_address)
+    mp_reach.extend(evpn_nlri)
+
+    # Add MP_REACH_NLRI attribute
+    path_attrs.extend(b"\x80")  # Flags (optional)
+    path_attrs.extend(b"\x0e")  # Type = MP_REACH_NLRI
+    path_attrs.extend(bytes([len(mp_reach)]))
+    path_attrs.extend(mp_reach)
+
+    # Add path attributes to UPDATE
+    data.extend(len(path_attrs).to_bytes(2, "big"))
+    data.extend(path_attrs)
+
+    # No NLRI in standard UPDATE (all in MP_REACH_NLRI)
+
+    # Update BGP message length
+    data[16:18] = len(data).to_bytes(2, "big")
+
+    return bytes(data)
+
+
+def build_evpn_route_monitoring_message(
+    peer_ip: str,
+    peer_asn: int,
+    rd: str,
+    esi: str,
+    mac_address: str,
+    ip_address: str | None,
+    next_hop: str,
+    as_path: list[int],
+) -> bytes:
+    """Build complete BMP Route Monitoring message with EVPN Type 2 route."""
+    # Build BGP UPDATE with EVPN
+    bgp_update = build_bgp_update_with_evpn(
+        rd=rd,
+        esi=esi,
+        mac_address=mac_address,
+        ip_address=ip_address,
+        next_hop=next_hop,
+        as_path=as_path,
+    )
+
+    # Build BMP message
+    data = bytearray()
+
+    # Per-Peer Header
+    per_peer = build_per_peer_header(peer_ip, peer_asn)
+    data.extend(per_peer)
+
+    # BGP UPDATE
+    data.extend(bgp_update)
+
+    # Build BMP header
+    total_length = 6 + len(data)  # Header + body
+    header = build_bmp_header(total_length, 0)  # Type 0 = Route Monitoring
+
+    return header + bytes(data)
+
+
+class TestEVPNEndToEnd:
+    """Test EVPN routes end-to-end to database."""
+
+    @pytest.mark.asyncio
+    async def test_evpn_type2_with_ip_to_database(
+        self, listener, db_pool, batch_writer, clean_db
+    ):
+        """Test EVPN Type 2 route with MAC+IP end-to-end to database."""
+        if not listener.server or not listener.server.sockets:
+            pytest.skip("Listener not started")
+
+        port = listener.server.sockets[0].getsockname()[1]
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+
+        try:
+            # Send Peer Up
+            peer_up = build_peer_up_message("192.0.2.30", 65300)
+            writer.write(peer_up)
+            await writer.drain()
+            await asyncio.sleep(0.3)
+
+            # Send EVPN Type 2 route with MAC+IP
+            evpn_msg = build_evpn_route_monitoring_message(
+                peer_ip="192.0.2.30",
+                peer_asn=65300,
+                rd="65300:100",
+                esi="00:11:22:33:44:55:66:77:88:99",
+                mac_address="aa:bb:cc:dd:ee:ff",
+                ip_address="192.168.1.10",
+                next_hop="192.0.2.254",
+                as_path=[65300, 65400],
+            )
+            writer.write(evpn_msg)
+            await writer.drain()
+
+            # Wait for listener to process the message and add to batch
+            await asyncio.sleep(1.0)
+
+            # Force batch flush
+            await batch_writer.flush()
+            await asyncio.sleep(0.5)
+
+            # Verify in database
+            async with db_pool.get_pool().acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT * FROM route_updates
+                    WHERE mac_address = $1::macaddr
+                    """,
+                    "aa:bb:cc:dd:ee:ff",
+                )
+
+                assert row is not None, "EVPN route not found in database"
+                # PostgreSQL returns prefix as IPv4Network object
+                assert str(row["prefix"]) == "192.168.1.10/32"
+                assert row["evpn_route_type"] == 2
+                assert row["evpn_rd"] == "65300:100"
+                assert row["evpn_esi"] == "00:11:22:33:44:55:66:77:88:99"
+                assert row["family"] == "evpn"
+                assert row["is_withdrawn"] is False
+                # Verify MAC address codec worked
+                assert str(row["mac_address"]) == "aa:bb:cc:dd:ee:ff"
+
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    @pytest.mark.asyncio
+    async def test_evpn_type2_mac_only_to_database(
+        self, listener, db_pool, batch_writer, clean_db
+    ):
+        """Test EVPN Type 2 route with MAC-only (no IP) to database."""
+        if not listener.server or not listener.server.sockets:
+            pytest.skip("Listener not started")
+
+        port = listener.server.sockets[0].getsockname()[1]
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+
+        try:
+            # Send Peer Up
+            peer_up = build_peer_up_message("192.0.2.40", 65400)
+            writer.write(peer_up)
+            await writer.drain()
+            await asyncio.sleep(0.3)
+
+            # Send EVPN Type 2 route with MAC-only (no IP)
+            evpn_msg = build_evpn_route_monitoring_message(
+                peer_ip="192.0.2.40",
+                peer_asn=65400,
+                rd="65400:200",
+                esi="00:aa:bb:cc:dd:ee:ff:00:11:22",
+                mac_address="11:22:33:44:55:66",
+                ip_address=None,  # MAC-only route
+                next_hop="192.0.2.254",
+                as_path=[65400],
+            )
+            writer.write(evpn_msg)
+            await writer.drain()
+
+            # Wait for listener to process the message and add to batch
+            await asyncio.sleep(1.0)
+
+            # Force batch flush
+            await batch_writer.flush()
+            await asyncio.sleep(0.5)
+
+            # Verify in database
+            async with db_pool.get_pool().acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT * FROM route_updates
+                    WHERE mac_address = $1::macaddr
+                      AND evpn_rd = $2
+                    """,
+                    "11:22:33:44:55:66",
+                    "65400:200",
+                )
+
+                assert row is not None, "EVPN MAC-only route not found in database"
+                # Prefix should be NULL for MAC-only routes
+                assert row["prefix"] is None
+                assert row["evpn_route_type"] == 2
+                assert row["evpn_rd"] == "65400:200"
+                assert row["evpn_esi"] == "00:aa:bb:cc:dd:ee:ff:00:11:22"
+                assert row["family"] == "evpn"
+                assert str(row["mac_address"]) == "11:22:33:44:55:66"
+
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    @pytest.mark.asyncio
+    async def test_multiple_evpn_routes(
+        self, listener, db_pool, batch_writer, clean_db
+    ):
+        """Test multiple EVPN routes in database."""
+        if not listener.server or not listener.server.sockets:
+            pytest.skip("Listener not started")
+
+        port = listener.server.sockets[0].getsockname()[1]
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+
+        try:
+            # Send Peer Up
+            peer_up = build_peer_up_message("192.0.2.50", 65500)
+            writer.write(peer_up)
+            await writer.drain()
+            await asyncio.sleep(0.3)
+
+            # Send 10 EVPN routes with different MACs
+            for i in range(10):
+                evpn_msg = build_evpn_route_monitoring_message(
+                    peer_ip="192.0.2.50",
+                    peer_asn=65500,
+                    rd=f"65500:{100 + i}",
+                    esi="00:11:22:33:44:55:66:77:88:99",
+                    mac_address=f"aa:bb:cc:dd:ee:{i:02x}",
+                    ip_address=f"192.168.10.{i + 1}",
+                    next_hop="192.0.2.254",
+                    as_path=[65500],
+                )
+                writer.write(evpn_msg)
+
+            await writer.drain()
+
+            # Wait for listener to process all messages and add to batch
+            await asyncio.sleep(1.0)
+
+            await batch_writer.flush()
+            await asyncio.sleep(0.5)
+
+            # Verify all 10 EVPN routes in database
+            async with db_pool.get_pool().acquire() as conn:
+                count = await conn.fetchval(
+                    """
+                    SELECT COUNT(*) FROM route_updates
+                    WHERE family = 'evpn' AND evpn_route_type = 2
+                    """
+                )
+                assert count == 10
+
+                # Verify one specific route
+                row = await conn.fetchrow(
+                    """
+                    SELECT * FROM route_updates
+                    WHERE mac_address = $1::macaddr
+                    """,
+                    "aa:bb:cc:dd:ee:05",
+                )
+                assert row is not None
+                assert row["evpn_rd"] == "65500:105"
+                assert str(row["prefix"]) == "192.168.10.6/32"
 
         finally:
             writer.close()

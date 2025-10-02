@@ -1,6 +1,7 @@
 """BGP UPDATE message parser implementation."""
 
 from ipaddress import IPv4Address, IPv6Address
+from typing import Any
 
 from pybmpmon.protocol.bgp import (
     ATTR_FLAG_EXTENDED_LENGTH,
@@ -316,7 +317,158 @@ def parse_communities(value: bytes) -> list[str]:
     return communities
 
 
-def parse_mp_reach_nlri(value: bytes) -> tuple[int, int, str | None, list[str]]:
+def parse_route_distinguisher(value: bytes, offset: int) -> str:
+    """
+    Parse Route Distinguisher (8 bytes) per RFC4364.
+
+    Args:
+        value: Binary data containing RD
+        offset: Starting offset
+
+    Returns:
+        RD as string in format "ASN:value" or "IP:value"
+
+    Raises:
+        BGPParseError: If RD is malformed
+    """
+    if len(value) < offset + 8:
+        raise BGPParseError("Route Distinguisher too short")
+
+    rd_type = read_uint16(value, offset)
+
+    if rd_type == 0:
+        # Type 0: 2-byte administrator + 4-byte assigned number
+        admin = read_uint16(value, offset + 2)
+        assigned = read_uint32(value, offset + 4)
+        return f"{admin}:{assigned}"
+    elif rd_type == 1:
+        # Type 1: 4-byte IP address + 2-byte assigned number
+        ip_bytes = read_bytes(value, offset + 2, 4)
+        ip = str(IPv4Address(ip_bytes))
+        assigned = read_uint16(value, offset + 6)
+        return f"{ip}:{assigned}"
+    elif rd_type == 2:
+        # Type 2: 4-byte administrator + 2-byte assigned number
+        admin = read_uint32(value, offset + 2)
+        assigned = read_uint16(value, offset + 6)
+        return f"{admin}:{assigned}"
+    else:
+        # Unknown type - return hex representation
+        rd_bytes = read_bytes(value, offset, 8)
+        return rd_bytes.hex()
+
+
+def parse_ethernet_segment_id(value: bytes, offset: int) -> str:
+    """
+    Parse Ethernet Segment Identifier (10 bytes) per RFC7432.
+
+    Args:
+        value: Binary data containing ESI
+        offset: Starting offset
+
+    Returns:
+        ESI as colon-separated hex string
+
+    Raises:
+        BGPParseError: If ESI is malformed
+    """
+    if len(value) < offset + 10:
+        raise BGPParseError("Ethernet Segment Identifier too short")
+
+    esi_bytes = read_bytes(value, offset, 10)
+    # Format as colon-separated hex pairs
+    return ":".join(f"{b:02x}" for b in esi_bytes)
+
+
+def parse_evpn_nlri(value: bytes, offset: int) -> tuple[dict[str, Any] | None, int]:
+    """
+    Parse EVPN NLRI per RFC7432 Section 7.
+
+    Args:
+        value: Binary data containing EVPN NLRI
+        offset: Starting offset
+
+    Returns:
+        Tuple of (route_info dict or None, bytes_consumed)
+        route_info contains: route_type, rd, esi, mac_address, ip_address
+
+    Raises:
+        BGPParseError: If NLRI is malformed
+    """
+    if len(value) < offset + 2:
+        return None, 0
+
+    route_type = read_uint8(value, offset)
+    length = read_uint8(value, offset + 1)
+
+    # Check if we have enough data for the route
+    if len(value) < offset + 2 + length:
+        raise BGPParseError(f"EVPN NLRI truncated: need {length} bytes")
+
+    route_offset = offset + 2
+
+    # Type 2: MAC/IP Advertisement Route (most common)
+    if route_type == 2:
+        # Minimum: 8 (RD) + 10 (ESI) + 4 (Tag) + 1 (MAC len)
+        #          + 6 (MAC) + 1 (IP len) + 3 (Label)
+        if length < 33:
+            raise BGPParseError("EVPN Type 2 NLRI too short")
+
+        # Parse Route Distinguisher (8 bytes)
+        rd = parse_route_distinguisher(value, route_offset)
+        route_offset += 8
+
+        # Parse Ethernet Segment Identifier (10 bytes)
+        esi = parse_ethernet_segment_id(value, route_offset)
+        route_offset += 10
+
+        # Skip Ethernet Tag ID (4 bytes)
+        route_offset += 4
+
+        # Parse MAC Address Length (1 byte, should be 48 bits)
+        mac_len = read_uint8(value, route_offset)
+        route_offset += 1
+
+        mac_address = None
+        if mac_len == 48:  # 48 bits = 6 bytes
+            if len(value) >= route_offset + 6:
+                mac_bytes = read_bytes(value, route_offset, 6)
+                mac_address = ":".join(f"{b:02x}" for b in mac_bytes)
+                route_offset += 6
+
+        # Parse IP Address Length (1 byte)
+        ip_len = read_uint8(value, route_offset)
+        route_offset += 1
+
+        ip_address = None
+        if ip_len == 32 and len(value) >= route_offset + 4:
+            # IPv4 address
+            ip_bytes = read_bytes(value, route_offset, 4)
+            ip_address = str(IPv4Address(ip_bytes))
+            route_offset += 4
+        elif ip_len == 128 and len(value) >= route_offset + 16:
+            # IPv6 address
+            ip_bytes = read_bytes(value, route_offset, 16)
+            ip_address = str(IPv6Address(ip_bytes))
+            route_offset += 16
+
+        # Note: MPLS labels (3 bytes each) are at the end but we don't parse them
+
+        return {
+            "route_type": route_type,
+            "rd": rd,
+            "esi": esi,
+            "mac_address": mac_address,
+            "ip_address": ip_address,
+        }, 2 + length
+
+    # For other route types, just skip for now
+    return {"route_type": route_type}, 2 + length
+
+
+def parse_mp_reach_nlri(
+    value: bytes,
+) -> tuple[int, int, str | None, list[str | dict[str, Any]]]:
     """
     Parse MP_REACH_NLRI attribute (RFC4760).
 
@@ -325,6 +477,8 @@ def parse_mp_reach_nlri(value: bytes) -> tuple[int, int, str | None, list[str]]:
 
     Returns:
         Tuple of (AFI, SAFI, next_hop, prefixes)
+        For EVPN routes, prefixes contains dicts with route_info
+        For IPv4/IPv6 routes, prefixes contains prefix strings
 
     Raises:
         BGPParseError: If attribute is malformed
@@ -349,12 +503,18 @@ def parse_mp_reach_nlri(value: bytes) -> tuple[int, int, str | None, list[str]]:
     elif afi == AddressFamilyIdentifier.IPV6:
         if next_hop_len >= 16:
             next_hop = str(IPv6Address(next_hop_data[:16]))
+    elif afi == AddressFamilyIdentifier.L2VPN:
+        # L2VPN (EVPN) can have IPv4 or IPv6 next hop
+        if next_hop_len == 4:
+            next_hop = str(IPv4Address(next_hop_data[:4]))
+        elif next_hop_len == 16:
+            next_hop = str(IPv6Address(next_hop_data[:16]))
 
     # Reserved byte
     offset = 4 + next_hop_len + 1
 
     # Parse NLRI based on AFI/SAFI
-    prefixes: list[str] = []
+    prefixes: list[str | dict[str, Any]] = []
 
     if (
         afi == AddressFamilyIdentifier.IPV4
@@ -372,11 +532,25 @@ def parse_mp_reach_nlri(value: bytes) -> tuple[int, int, str | None, list[str]]:
             prefix, consumed = parse_ipv6_prefix(value, offset)
             prefixes.append(prefix)
             offset += consumed
+    elif (
+        afi == AddressFamilyIdentifier.L2VPN
+        and safi == SubsequentAddressFamilyIdentifier.EVPN
+    ):
+        # Parse EVPN NLRI - returns dicts with route_info
+        while offset < len(value):
+            route_info, consumed = parse_evpn_nlri(value, offset)
+            if route_info:
+                prefixes.append(route_info)
+            if consumed == 0:
+                break  # Avoid infinite loop
+            offset += consumed
 
     return afi, safi, next_hop, prefixes
 
 
-def parse_mp_unreach_nlri(value: bytes) -> tuple[int, int, list[str]]:
+def parse_mp_unreach_nlri(
+    value: bytes,
+) -> tuple[int, int, list[str | dict[str, Any]]]:
     """
     Parse MP_UNREACH_NLRI attribute (RFC4760).
 
@@ -385,6 +559,8 @@ def parse_mp_unreach_nlri(value: bytes) -> tuple[int, int, list[str]]:
 
     Returns:
         Tuple of (AFI, SAFI, withdrawn_prefixes)
+        For EVPN routes, withdrawn_prefixes contains dicts with route_info
+        For IPv4/IPv6 routes, withdrawn_prefixes contains prefix strings
 
     Raises:
         BGPParseError: If attribute is malformed
@@ -397,7 +573,7 @@ def parse_mp_unreach_nlri(value: bytes) -> tuple[int, int, list[str]]:
     offset = 3
 
     # Parse withdrawn routes based on AFI/SAFI
-    prefixes: list[str] = []
+    prefixes: list[str | dict[str, Any]] = []
 
     if (
         afi == AddressFamilyIdentifier.IPV4
@@ -414,6 +590,18 @@ def parse_mp_unreach_nlri(value: bytes) -> tuple[int, int, list[str]]:
         while offset < len(value):
             prefix, consumed = parse_ipv6_prefix(value, offset)
             prefixes.append(prefix)
+            offset += consumed
+    elif (
+        afi == AddressFamilyIdentifier.L2VPN
+        and safi == SubsequentAddressFamilyIdentifier.EVPN
+    ):
+        # Parse EVPN NLRI withdrawals - returns dicts with route_info
+        while offset < len(value):
+            route_info, consumed = parse_evpn_nlri(value, offset)
+            if route_info:
+                prefixes.append(route_info)
+            if consumed == 0:
+                break  # Avoid infinite loop
             offset += consumed
 
     return afi, safi, prefixes
@@ -437,8 +625,8 @@ def parse_bgp_update(data: bytes) -> ParsedBGPUpdate:
     # Initialize parsed data
     afi: int | None = None
     safi: int | None = None
-    prefixes: list[str] = []
-    withdrawn_prefixes: list[str] = []
+    prefixes: list[str | dict[str, Any]] = []
+    withdrawn_prefixes: list[str | dict[str, Any]] = []
     origin: int | None = None
     as_path: list[int] | None = None
     next_hop: str | None = None
@@ -449,6 +637,7 @@ def parse_bgp_update(data: bytes) -> ParsedBGPUpdate:
     evpn_rd: str | None = None
     evpn_esi: str | None = None
     mac_address: str | None = None
+    has_mp_unreach: bool = False
 
     # Parse withdrawn routes (IPv4 only in standard UPDATE)
     offset = 0
@@ -477,9 +666,40 @@ def parse_bgp_update(data: bytes) -> ParsedBGPUpdate:
                 afi, safi, mp_next_hop, mp_prefixes = parse_mp_reach_nlri(attr.value)
                 if mp_next_hop:
                     next_hop = mp_next_hop
+
+                # For EVPN routes, extract fields from route_info dict
+                if (
+                    afi == AddressFamilyIdentifier.L2VPN
+                    and safi == SubsequentAddressFamilyIdentifier.EVPN
+                    and mp_prefixes
+                ):
+                    # Extract EVPN fields from first route
+                    first_route = mp_prefixes[0]
+                    if isinstance(first_route, dict):
+                        evpn_route_type = first_route.get("route_type")
+                        evpn_rd = first_route.get("rd")
+                        evpn_esi = first_route.get("esi")
+                        mac_address = first_route.get("mac_address")
+
                 prefixes.extend(mp_prefixes)
             elif attr.type_code == BGPPathAttributeType.MP_UNREACH_NLRI:
                 afi, safi, mp_withdrawn = parse_mp_unreach_nlri(attr.value)
+                has_mp_unreach = True
+
+                # For EVPN withdrawals, extract fields from route_info dict
+                if (
+                    afi == AddressFamilyIdentifier.L2VPN
+                    and safi == SubsequentAddressFamilyIdentifier.EVPN
+                    and mp_withdrawn
+                ):
+                    # Extract EVPN fields from first route
+                    first_route = mp_withdrawn[0]
+                    if isinstance(first_route, dict):
+                        evpn_route_type = first_route.get("route_type")
+                        evpn_rd = first_route.get("rd")
+                        evpn_esi = first_route.get("esi")
+                        mac_address = first_route.get("mac_address")
+
                 withdrawn_prefixes.extend(mp_withdrawn)
         except Exception:
             # Skip malformed attributes
@@ -496,7 +716,12 @@ def parse_bgp_update(data: bytes) -> ParsedBGPUpdate:
             offset += consumed
 
     # Determine if this is a withdrawal
-    is_withdrawal = len(prefixes) == 0 and len(withdrawn_prefixes) > 0
+    # A message is a withdrawal if:
+    # 1. It has withdrawn routes, OR
+    # 2. It has MP_UNREACH_NLRI (even with no actual NLRI) and no announced routes
+    is_withdrawal = len(withdrawn_prefixes) > 0 or (
+        has_mp_unreach and len(prefixes) == 0
+    )
 
     return ParsedBGPUpdate(
         afi=afi,

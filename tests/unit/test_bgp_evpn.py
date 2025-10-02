@@ -99,8 +99,8 @@ class TestBGPUpdateWithEVPN:
         # ORIGIN (IGP)
         path_attrs.extend(b"\x40\x01\x01\x00")
 
-        # AS_PATH (sequence: 65001, 65002)
-        path_attrs.extend(b"\x40\x02\x08\x02\x02\xfd\xe9\xfd\xea")
+        # AS_PATH (sequence: 65001, 65002) - 2-byte AS numbers
+        path_attrs.extend(b"\x40\x02\x06\x02\x02\xfd\xe9\xfd\xea")
 
         # MP_REACH_NLRI with EVPN
         mp_reach = bytearray()
@@ -278,7 +278,7 @@ class TestEVPNIntegration:
     """Integration tests for EVPN route handling."""
 
     def test_multiple_evpn_routes_in_update(self) -> None:
-        """Test BGP UPDATE with multiple EVPN routes (when NLRI parsing is implemented)."""
+        """Test BGP UPDATE with multiple EVPN routes."""
         # For now, this tests the structure is recognized
         data = bytearray()
 

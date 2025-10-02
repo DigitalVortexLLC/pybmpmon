@@ -136,29 +136,21 @@ class BatchWriter:
 
         try:
             async with self.pool.acquire() as conn:
-                await conn.copy_records_to_table(
-                    TABLE_ROUTE_UPDATES,
-                    records=self.batch,
-                    columns=[
-                        "time",
-                        "bmp_peer_ip",
-                        "bmp_peer_asn",
-                        "bgp_peer_ip",
-                        "bgp_peer_asn",
-                        "family",
-                        "prefix",
-                        "next_hop",
-                        "as_path",
-                        "communities",
-                        "med",
-                        "local_pref",
-                        "is_withdrawn",
-                        "evpn_route_type",
-                        "evpn_rd",
-                        "evpn_esi",
-                        "mac_address",
-                    ],
-                )
+                # Use executemany for INSERT instead of COPY due to
+                # macaddr binary format issue. COPY with binary format
+                # doesn't support macaddr type in PostgreSQL.
+                query = f"""
+                    INSERT INTO {TABLE_ROUTE_UPDATES} (
+                        time, bmp_peer_ip, bmp_peer_asn, bgp_peer_ip,
+                        bgp_peer_asn, family, prefix, next_hop, as_path,
+                        communities, med, local_pref, is_withdrawn,
+                        evpn_route_type, evpn_rd, evpn_esi, mac_address
+                    ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                        $11, $12, $13, $14, $15, $16, $17::macaddr
+                    )
+                """
+                await conn.executemany(query, self.batch)
 
             elapsed = (asyncio.get_event_loop().time() - start_time) * 1000
             self.total_routes_written += batch_count

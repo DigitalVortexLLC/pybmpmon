@@ -261,7 +261,7 @@ class TestStatisticsCollector:
         collector = StatisticsCollector(log_interval=1.0)
 
         # Add some routes
-        for i in range(100):
+        for _ in range(100):
             collector.increment_received("192.0.2.1")
             collector.increment_processed("192.0.2.1", "ipv4_unicast")
 

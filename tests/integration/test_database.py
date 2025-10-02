@@ -1,6 +1,5 @@
 """Integration tests for database operations using testcontainers."""
 
-import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -30,33 +29,26 @@ from pybmpmon.models.route import RouteUpdate
 from testcontainers.postgres import PostgresContainer
 
 
-@pytest.fixture(scope="session")
-def event_loop():
-    """Create event loop for async tests."""
-    loop = asyncio.get_event_loop_policy().new_event_loop()
-    yield loop
-    loop.close()
-
-
-@pytest.fixture(scope="session")
-async def postgres_container():
+@pytest.fixture
+def postgres_container():
     """Start PostgreSQL/TimescaleDB container for tests."""
     with PostgresContainer("timescale/timescaledb:latest-pg16") as postgres:
-        # Wait for container to be ready
-        await asyncio.sleep(2)
         yield postgres
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 async def db_pool(postgres_container):
     """Create database pool and run migrations."""
     # Extract connection parameters
     connection_url = postgres_container.get_connection_url()
 
-    # Parse URL (format: postgresql://user:pass@host:port/db)
+    # Parse URL (format: postgresql://user:pass@host:port/db or postgresql+driver://...)
     import re
 
-    match = re.match(r"postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)", connection_url)
+    # Handle both postgresql:// and postgresql+psycopg2:// URLs
+    match = re.match(
+        r"postgresql(?:\+\w+)?://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)", connection_url
+    )
     if not match:
         raise ValueError(f"Invalid connection URL: {connection_url}")
 
@@ -112,8 +104,8 @@ class TestBMPPeerOperations:
         peer = BMPPeer(
             peer_ip="192.0.2.1",
             router_id="192.0.2.1",
-            first_seen=datetime.utcnow(),
-            last_seen=datetime.utcnow(),
+            first_seen=datetime.now(UTC),
+            last_seen=datetime.now(UTC),
             is_active=True,
         )
 
@@ -191,7 +183,7 @@ class TestPeerEventOperations:
     async def test_insert_peer_up_event(self, db_pool, clean_db):
         """Test inserting a peer up event."""
         event = PeerEvent(
-            time=datetime.utcnow(),
+            time=datetime.now(UTC),
             peer_ip="192.0.2.1",
             event_type=EVENT_PEER_UP,
         )
@@ -206,7 +198,7 @@ class TestPeerEventOperations:
     async def test_insert_peer_down_event(self, db_pool, clean_db):
         """Test inserting a peer down event."""
         event = PeerEvent(
-            time=datetime.utcnow(),
+            time=datetime.now(UTC),
             peer_ip="192.0.2.1",
             event_type=EVENT_PEER_DOWN,
             reason_code=1,
@@ -227,7 +219,7 @@ class TestRouteUpdateOperations:
     async def test_insert_ipv4_route(self, db_pool, clean_db):
         """Test inserting an IPv4 unicast route."""
         route = RouteUpdate(
-            time=datetime.utcnow(),
+            time=datetime.now(UTC),
             bmp_peer_ip="192.0.2.1",
             bmp_peer_asn=65000,
             bgp_peer_ip="192.0.2.100",
@@ -251,7 +243,7 @@ class TestRouteUpdateOperations:
     async def test_insert_ipv6_route(self, db_pool, clean_db):
         """Test inserting an IPv6 unicast route."""
         route = RouteUpdate(
-            time=datetime.utcnow(),
+            time=datetime.now(UTC),
             bmp_peer_ip="2001:db8::1",
             bgp_peer_ip="2001:db8::100",
             family=FAMILY_IPV6_UNICAST,
@@ -268,7 +260,7 @@ class TestRouteUpdateOperations:
     async def test_insert_evpn_route(self, db_pool, clean_db):
         """Test inserting an EVPN route."""
         route = RouteUpdate(
-            time=datetime.utcnow(),
+            time=datetime.now(UTC),
             bmp_peer_ip="192.0.2.1",
             bgp_peer_ip="192.0.2.100",
             family=FAMILY_EVPN,
