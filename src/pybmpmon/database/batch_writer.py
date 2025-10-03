@@ -167,7 +167,24 @@ class BatchWriter:
                 for route_tuple in self.batch:
                     await conn.execute(
                         """
-                        SELECT update_route_state($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                        SELECT update_route_state(
+                            $1::TIMESTAMPTZ,
+                            $2::INET,
+                            $3::INET,
+                            $4::TEXT,
+                            $5::CIDR,
+                            $6::INET,
+                            $7::INTEGER[],
+                            $8::TEXT[],
+                            $9::TEXT[],
+                            $10::INTEGER,
+                            $11::INTEGER,
+                            $12::BOOLEAN,
+                            $13::INTEGER,
+                            $14::TEXT,
+                            $15::TEXT,
+                            $16::TEXT
+                        )
                         """,
                         route_tuple[0],  # time
                         route_tuple[1],  # bmp_peer_ip

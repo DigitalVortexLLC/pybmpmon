@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS route_state (
     bmp_peer_ip INET NOT NULL,
     bgp_peer_ip INET NOT NULL,
     family TEXT NOT NULL,
-    prefix CIDR NOT NULL,
+    prefix CIDR,  -- Nullable for EVPN routes without IP prefix
 
     -- Timestamps
     first_seen TIMESTAMPTZ NOT NULL,
@@ -34,10 +34,24 @@ CREATE TABLE IF NOT EXISTS route_state (
     evpn_route_type INTEGER,
     evpn_rd TEXT,
     evpn_esi TEXT,
-    mac_address TEXT,
-
-    PRIMARY KEY (bmp_peer_ip, bgp_peer_ip, family, prefix)
+    mac_address TEXT
 );
+
+-- Unique constraints for different route families
+-- For IP routes (ipv4_unicast, ipv6_unicast): prefix is the unique identifier
+CREATE UNIQUE INDEX IF NOT EXISTS idx_route_state_ip_routes
+ON route_state (bmp_peer_ip, bgp_peer_ip, family, prefix)
+WHERE family IN ('ipv4_unicast', 'ipv6_unicast') AND prefix IS NOT NULL;
+
+-- For EVPN routes: combination of EVPN-specific fields provides uniqueness
+-- EVPN route uniqueness depends on route type, RD, and other fields
+CREATE UNIQUE INDEX IF NOT EXISTS idx_route_state_evpn_routes
+ON route_state (bmp_peer_ip, bgp_peer_ip, family,
+                COALESCE(evpn_rd, ''),
+                COALESCE(evpn_esi, ''),
+                COALESCE(mac_address, ''),
+                COALESCE(prefix::TEXT, ''))
+WHERE family = 'evpn';
 
 -- Indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_route_state_first_seen ON route_state (first_seen DESC);
@@ -48,7 +62,7 @@ CREATE INDEX IF NOT EXISTS idx_route_state_prefix ON route_state (prefix);
 CREATE INDEX IF NOT EXISTS idx_route_state_bmp_peer ON route_state (bmp_peer_ip);
 
 -- Index for high-churn routes (learned/withdrawn frequently)
-CREATE INDEX IF NOT EXISTS idx_route_state_churn ON route_state (learn_count + withdraw_count DESC)
+CREATE INDEX IF NOT EXISTS idx_route_state_churn ON route_state ((learn_count + withdraw_count) DESC)
 WHERE learn_count + withdraw_count > 10;
 
 -- Function to update route state on new route update
@@ -74,93 +88,122 @@ CREATE OR REPLACE FUNCTION update_route_state(
 DECLARE
     v_current_withdrawn BOOLEAN;
     v_state_changed BOOLEAN := FALSE;
+    v_row_count INTEGER;
 BEGIN
     -- Check if route exists and get current withdrawn state
-    SELECT is_withdrawn INTO v_current_withdrawn
-    FROM route_state
-    WHERE bmp_peer_ip = p_bmp_peer_ip
-      AND bgp_peer_ip = p_bgp_peer_ip
-      AND family = p_family
-      AND prefix = p_prefix;
+    -- For IP routes, match on prefix; for EVPN, match on EVPN fields
+    IF p_family IN ('ipv4_unicast', 'ipv6_unicast') THEN
+        SELECT is_withdrawn INTO v_current_withdrawn
+        FROM route_state
+        WHERE bmp_peer_ip = p_bmp_peer_ip
+          AND bgp_peer_ip = p_bgp_peer_ip
+          AND family = p_family
+          AND prefix = p_prefix;
+    ELSIF p_family = 'evpn' THEN
+        SELECT is_withdrawn INTO v_current_withdrawn
+        FROM route_state
+        WHERE bmp_peer_ip = p_bmp_peer_ip
+          AND bgp_peer_ip = p_bgp_peer_ip
+          AND family = p_family
+          AND COALESCE(evpn_rd, '') = COALESCE(p_evpn_rd, '')
+          AND COALESCE(evpn_esi, '') = COALESCE(p_evpn_esi, '')
+          AND COALESCE(mac_address, '') = COALESCE(p_mac_address, '')
+          AND COALESCE(prefix::TEXT, '') = COALESCE(p_prefix::TEXT, '');
+    END IF;
 
     -- Determine if state changed
     IF FOUND THEN
         v_state_changed := (v_current_withdrawn != p_is_withdrawn);
-    END IF;
 
-    -- Upsert route state
-    INSERT INTO route_state (
-        bmp_peer_ip,
-        bgp_peer_ip,
-        family,
-        prefix,
-        first_seen,
-        last_seen,
-        last_state_change,
-        is_withdrawn,
-        learn_count,
-        withdraw_count,
-        next_hop,
-        as_path,
-        communities,
-        extended_communities,
-        med,
-        local_pref,
-        evpn_route_type,
-        evpn_rd,
-        evpn_esi,
-        mac_address
-    ) VALUES (
-        p_bmp_peer_ip,
-        p_bgp_peer_ip,
-        p_family,
-        p_prefix,
-        p_time,  -- first_seen
-        p_time,  -- last_seen
-        p_time,  -- last_state_change
-        p_is_withdrawn,
-        CASE WHEN p_is_withdrawn THEN 0 ELSE 1 END,  -- learn_count
-        CASE WHEN p_is_withdrawn THEN 1 ELSE 0 END,  -- withdraw_count
-        p_next_hop,
-        p_as_path,
-        p_communities,
-        p_extended_communities,
-        p_med,
-        p_local_pref,
-        p_evpn_route_type,
-        p_evpn_rd,
-        p_evpn_esi,
-        p_mac_address
-    )
-    ON CONFLICT (bmp_peer_ip, bgp_peer_ip, family, prefix) DO UPDATE SET
-        last_seen = p_time,
-        -- Update last_state_change only if state actually changed
-        last_state_change = CASE
-            WHEN v_state_changed THEN p_time
-            ELSE route_state.last_state_change
-        END,
-        is_withdrawn = p_is_withdrawn,
-        -- Increment learn_count if transitioning from withdrawn to active
-        learn_count = route_state.learn_count + CASE
-            WHEN v_state_changed AND NOT p_is_withdrawn THEN 1
-            ELSE 0
-        END,
-        -- Increment withdraw_count if transitioning from active to withdrawn
-        withdraw_count = route_state.withdraw_count + CASE
-            WHEN v_state_changed AND p_is_withdrawn THEN 1
-            ELSE 0
-        END,
-        -- Update attributes only if route is active (not withdrawn)
-        next_hop = CASE WHEN NOT p_is_withdrawn THEN p_next_hop ELSE route_state.next_hop END,
-        as_path = CASE WHEN NOT p_is_withdrawn THEN p_as_path ELSE route_state.as_path END,
-        communities = CASE WHEN NOT p_is_withdrawn THEN p_communities ELSE route_state.communities END,
-        extended_communities = CASE WHEN NOT p_is_withdrawn THEN p_extended_communities ELSE route_state.extended_communities END,
-        med = CASE WHEN NOT p_is_withdrawn THEN p_med ELSE route_state.med END,
-        local_pref = CASE WHEN NOT p_is_withdrawn THEN p_local_pref ELSE route_state.local_pref END,
-        evpn_route_type = CASE WHEN NOT p_is_withdrawn THEN p_evpn_route_type ELSE route_state.evpn_route_type END,
-        evpn_rd = CASE WHEN NOT p_is_withdrawn THEN p_evpn_rd ELSE route_state.evpn_rd END,
-        evpn_esi = CASE WHEN NOT p_is_withdrawn THEN p_evpn_esi ELSE route_state.evpn_esi END,
-        mac_address = CASE WHEN NOT p_is_withdrawn THEN p_mac_address ELSE route_state.mac_address END;
+        -- Update existing route
+        IF p_family IN ('ipv4_unicast', 'ipv6_unicast') THEN
+            UPDATE route_state SET
+                last_seen = p_time,
+                last_state_change = CASE WHEN v_state_changed THEN p_time ELSE last_state_change END,
+                is_withdrawn = p_is_withdrawn,
+                learn_count = learn_count + CASE WHEN v_state_changed AND NOT p_is_withdrawn THEN 1 ELSE 0 END,
+                withdraw_count = withdraw_count + CASE WHEN v_state_changed AND p_is_withdrawn THEN 1 ELSE 0 END,
+                next_hop = CASE WHEN NOT p_is_withdrawn THEN p_next_hop ELSE next_hop END,
+                as_path = CASE WHEN NOT p_is_withdrawn THEN p_as_path ELSE as_path END,
+                communities = CASE WHEN NOT p_is_withdrawn THEN p_communities ELSE communities END,
+                extended_communities = CASE WHEN NOT p_is_withdrawn THEN p_extended_communities ELSE extended_communities END,
+                med = CASE WHEN NOT p_is_withdrawn THEN p_med ELSE med END,
+                local_pref = CASE WHEN NOT p_is_withdrawn THEN p_local_pref ELSE local_pref END
+            WHERE bmp_peer_ip = p_bmp_peer_ip
+              AND bgp_peer_ip = p_bgp_peer_ip
+              AND family = p_family
+              AND prefix = p_prefix;
+        ELSIF p_family = 'evpn' THEN
+            UPDATE route_state SET
+                last_seen = p_time,
+                last_state_change = CASE WHEN v_state_changed THEN p_time ELSE last_state_change END,
+                is_withdrawn = p_is_withdrawn,
+                learn_count = learn_count + CASE WHEN v_state_changed AND NOT p_is_withdrawn THEN 1 ELSE 0 END,
+                withdraw_count = withdraw_count + CASE WHEN v_state_changed AND p_is_withdrawn THEN 1 ELSE 0 END,
+                next_hop = CASE WHEN NOT p_is_withdrawn THEN p_next_hop ELSE next_hop END,
+                as_path = CASE WHEN NOT p_is_withdrawn THEN p_as_path ELSE as_path END,
+                communities = CASE WHEN NOT p_is_withdrawn THEN p_communities ELSE communities END,
+                extended_communities = CASE WHEN NOT p_is_withdrawn THEN p_extended_communities ELSE extended_communities END,
+                med = CASE WHEN NOT p_is_withdrawn THEN p_med ELSE med END,
+                local_pref = CASE WHEN NOT p_is_withdrawn THEN p_local_pref ELSE local_pref END,
+                evpn_route_type = CASE WHEN NOT p_is_withdrawn THEN p_evpn_route_type ELSE evpn_route_type END,
+                evpn_rd = CASE WHEN NOT p_is_withdrawn THEN p_evpn_rd ELSE evpn_rd END,
+                evpn_esi = CASE WHEN NOT p_is_withdrawn THEN p_evpn_esi ELSE evpn_esi END,
+                mac_address = CASE WHEN NOT p_is_withdrawn THEN p_mac_address ELSE mac_address END
+            WHERE bmp_peer_ip = p_bmp_peer_ip
+              AND bgp_peer_ip = p_bgp_peer_ip
+              AND family = p_family
+              AND COALESCE(evpn_rd, '') = COALESCE(p_evpn_rd, '')
+              AND COALESCE(evpn_esi, '') = COALESCE(p_evpn_esi, '')
+              AND COALESCE(mac_address, '') = COALESCE(p_mac_address, '')
+              AND COALESCE(prefix::TEXT, '') = COALESCE(p_prefix::TEXT, '');
+        END IF;
+    ELSE
+        -- Insert new route
+        INSERT INTO route_state (
+            bmp_peer_ip,
+            bgp_peer_ip,
+            family,
+            prefix,
+            first_seen,
+            last_seen,
+            last_state_change,
+            is_withdrawn,
+            learn_count,
+            withdraw_count,
+            next_hop,
+            as_path,
+            communities,
+            extended_communities,
+            med,
+            local_pref,
+            evpn_route_type,
+            evpn_rd,
+            evpn_esi,
+            mac_address
+        ) VALUES (
+            p_bmp_peer_ip,
+            p_bgp_peer_ip,
+            p_family,
+            p_prefix,
+            p_time,
+            p_time,
+            p_time,
+            p_is_withdrawn,
+            CASE WHEN p_is_withdrawn THEN 0 ELSE 1 END,
+            CASE WHEN p_is_withdrawn THEN 1 ELSE 0 END,
+            p_next_hop,
+            p_as_path,
+            p_communities,
+            p_extended_communities,
+            p_med,
+            p_local_pref,
+            p_evpn_route_type,
+            p_evpn_rd,
+            p_evpn_esi,
+            p_mac_address
+        );
+    END IF;
 END;
 $$ LANGUAGE plpgsql;
 
