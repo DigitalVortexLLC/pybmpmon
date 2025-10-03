@@ -107,6 +107,7 @@ class BatchWriter:
             str(route.next_hop) if route.next_hop else None,
             route.as_path,
             route.communities,
+            route.extended_communities,
             route.med,
             route.local_pref,
             route.is_withdrawn,
@@ -151,6 +152,7 @@ class BatchWriter:
                         "next_hop",
                         "as_path",
                         "communities",
+                        "extended_communities",
                         "med",
                         "local_pref",
                         "is_withdrawn",
@@ -160,6 +162,30 @@ class BatchWriter:
                         "mac_address",
                     ],
                 )
+
+                # Update route state tracking for each route in batch
+                for route_tuple in self.batch:
+                    await conn.execute(
+                        """
+                        SELECT update_route_state($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                        """,
+                        route_tuple[0],  # time
+                        route_tuple[1],  # bmp_peer_ip
+                        route_tuple[3],  # bgp_peer_ip
+                        route_tuple[5],  # family
+                        route_tuple[6],  # prefix
+                        route_tuple[7],  # next_hop
+                        route_tuple[8],  # as_path
+                        route_tuple[9],  # communities
+                        route_tuple[10],  # extended_communities
+                        route_tuple[11],  # med
+                        route_tuple[12],  # local_pref
+                        route_tuple[13],  # is_withdrawn
+                        route_tuple[14],  # evpn_route_type
+                        route_tuple[15],  # evpn_rd
+                        route_tuple[16],  # evpn_esi
+                        route_tuple[17],  # mac_address
+                    )
 
             elapsed = (asyncio.get_event_loop().time() - start_time) * 1000
             self.total_routes_written += batch_count

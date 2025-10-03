@@ -31,6 +31,9 @@ class RouteUpdate(BaseModel):
     next_hop: IPvAnyAddress | None = Field(None, description="BGP next hop")
     as_path: list[int] | None = Field(None, description="AS_PATH attribute")
     communities: list[str] | None = Field(None, description="BGP communities")
+    extended_communities: list[str] | None = Field(
+        None, description="BGP extended communities"
+    )
     med: int | None = Field(None, description="Multi-Exit Discriminator")
     local_pref: int | None = Field(None, description="Local preference")
     is_withdrawn: bool = Field(False, description="Whether route is withdrawn")

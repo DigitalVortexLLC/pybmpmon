@@ -81,6 +81,9 @@ DATABASE_COMMAND_TIMEOUT=30.0
 !!! danger "Required Configuration"
     `DATABASE_PASSWORD` must be set. Application will fail to start if not provided.
 
+!!! info "Automatic Schema Initialization"
+    The application automatically detects if the database schema exists on startup. If the database is empty, all migrations are run automatically. No manual schema initialization is required when using an external database.
+
 #### Connection String Format
 
 Alternatively, use a single connection string:

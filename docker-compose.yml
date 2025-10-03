@@ -19,20 +19,24 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    # To disable this service (when using external PostgreSQL), set replicas to 0:
+    # deploy:
+    #   replicas: 0
+    profiles:
+      - local-db
 
   pybmpmon:
     build: .
     container_name: pybmpmon-app
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
       # Database configuration
-      DB_HOST: postgres
-      DB_PORT: 5432
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_PORT:-5432}
       DB_NAME: ${DB_NAME:-bmpmon}
       DB_USER: ${DB_USER:-bmpmon}
       DB_PASSWORD: ${DB_PASSWORD:-bmpmon}
+      DB_POOL_MIN_SIZE: ${DB_POOL_MIN_SIZE:-5}
+      DB_POOL_MAX_SIZE: ${DB_POOL_MAX_SIZE:-10}
       # BMP Listener configuration
       BMP_LISTEN_HOST: 0.0.0.0
       BMP_LISTEN_PORT: ${BMP_LISTEN_PORT:-11019}

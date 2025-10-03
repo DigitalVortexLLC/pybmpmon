@@ -271,14 +271,30 @@ def parse_as_path(value: bytes) -> list[int]:
         segment_length = read_uint8(value, offset + 1)
         offset += 2
 
-        # Each AS number is 2 bytes (or 4 bytes for AS4_PATH)
-        # For now, assume 2-byte AS numbers (legacy format)
-        as_size = 2
+        # Detect AS size: calculate remaining bytes and divide by segment length
+        # Modern BGP uses 4-byte AS numbers (RFC 6793), legacy uses 2-byte
+        remaining_bytes = len(value) - offset
+        if segment_length > 0:
+            bytes_per_as = remaining_bytes // segment_length
+            # Should be either 2 or 4 bytes per AS
+            if bytes_per_as == 4:
+                as_size = 4
+            elif bytes_per_as == 2:
+                as_size = 2
+            else:
+                # Try to determine from first segment
+                as_size = 4 if remaining_bytes >= segment_length * 4 else 2
+        else:
+            as_size = 4  # Default to 4-byte for empty segments
+
         if offset + (segment_length * as_size) > len(value):
             raise BGPParseError("Incomplete AS_PATH segment data")
 
         for _ in range(segment_length):
-            as_num = read_uint16(value, offset)
+            if as_size == 4:
+                as_num = read_uint32(value, offset)
+            else:
+                as_num = read_uint16(value, offset)
             if segment_type == BGPASPathSegmentType.AS_SEQUENCE:
                 as_path.append(as_num)
             elif segment_type == BGPASPathSegmentType.AS_SET:
@@ -315,6 +331,136 @@ def parse_communities(value: bytes) -> list[str]:
         offset += 4
 
     return communities
+
+
+def parse_extended_communities(value: bytes) -> list[str]:
+    """
+    Parse EXTENDED_COMMUNITIES attribute (RFC4360).
+
+    Extended communities are 8-byte values with various types:
+    - Type 0x00/0x02: Two-octet AS Route Target/Origin (AS:value)
+    - Type 0x01/0x03: IPv4 Address Route Target/Origin (IP:value)
+    - Type 0x02/0x0a: Four-octet AS Route Target/Origin (AS:value)
+    - Type 0x03/0x0b: Opaque Extended Community
+    - Type 0x06: EVPN (various subtypes)
+    - Type 0x08: Flow spec redirect
+    - Type 0x80+: Experimental
+
+    Args:
+        value: EXTENDED_COMMUNITIES attribute value
+
+    Returns:
+        List of extended community strings
+
+    Raises:
+        BGPParseError: If EXTENDED_COMMUNITIES is malformed
+    """
+    if len(value) % 8 != 0:
+        raise BGPParseError(
+            "Invalid EXTENDED_COMMUNITIES length (must be multiple of 8)"
+        )
+
+    extended_communities: list[str] = []
+    offset = 0
+
+    while offset < len(value):
+        ext_type = read_uint8(value, offset)
+        ext_subtype = read_uint8(value, offset + 1)
+
+        # OSPF Domain ID (0x03, subtype 0x0c) - check before IPv4 Route Origin
+        if ext_type == 0x03 and ext_subtype == 0x0C:
+            domain_bytes = read_bytes(value, offset + 2, 6)
+            # Last 4 bytes are the domain ID
+            domain_id_bytes = domain_bytes[2:6]
+            domain_id = str(IPv4Address(domain_id_bytes))
+            extended_communities.append(f"OSPF-Domain:{domain_id}")
+
+        # Two-octet AS specific (0x00 = Route Target, 0x02 = Route Origin)
+        elif ext_type == 0x00 and ext_subtype == 0x02:
+            as_num = read_uint16(value, offset + 2)
+            assigned = read_uint32(value, offset + 4)
+            extended_communities.append(f"RT:{as_num}:{assigned}")
+
+        elif ext_type == 0x02 and ext_subtype == 0x00:
+            as_num = read_uint16(value, offset + 2)
+            assigned = read_uint32(value, offset + 4)
+            extended_communities.append(f"RO:{as_num}:{assigned}")
+
+        # IPv4 Address specific (0x01 = Route Target, 0x03 = Route Origin)
+        elif ext_type == 0x01 and ext_subtype == 0x02:
+            ip_bytes = read_bytes(value, offset + 2, 4)
+            ip = str(IPv4Address(ip_bytes))
+            assigned = read_uint16(value, offset + 6)
+            extended_communities.append(f"RT:{ip}:{assigned}")
+
+        elif ext_type == 0x03 and ext_subtype == 0x00:
+            ip_bytes = read_bytes(value, offset + 2, 4)
+            ip = str(IPv4Address(ip_bytes))
+            assigned = read_uint16(value, offset + 6)
+            extended_communities.append(f"RO:{ip}:{assigned}")
+
+        # Four-octet AS specific (0x02 = Route Target, 0x0a = Route Origin)
+        elif ext_type == 0x02 and ext_subtype == 0x02:
+            as_num = read_uint32(value, offset + 2)
+            assigned = read_uint16(value, offset + 6)
+            extended_communities.append(f"RT:{as_num}:{assigned}")
+
+        elif ext_type == 0x0A and ext_subtype == 0x02:
+            as_num = read_uint32(value, offset + 2)
+            assigned = read_uint16(value, offset + 6)
+            extended_communities.append(f"RO:{as_num}:{assigned}")
+
+        # Opaque Extended Community (0x03)
+        elif ext_type == 0x03:
+            opaque_value = read_bytes(value, offset + 2, 6)
+            extended_communities.append(f"Opaque:{opaque_value.hex()}")
+
+        # EVPN Extended Community (0x06)
+        elif ext_type == 0x06:
+            # Common EVPN subtypes:
+            # 0x00 = MAC Mobility
+            # 0x01 = ESI Label
+            # 0x02 = ES-Import Route Target
+            if ext_subtype == 0x00:
+                # MAC Mobility: flags (1) + seq (4) + reserved (1)
+                _ = read_uint8(value, offset + 2)  # flags (unused for now)
+                seq = read_uint32(value, offset + 3)
+                extended_communities.append(f"EVPN-MAC-Mobility:{seq}")
+            elif ext_subtype == 0x01:
+                # ESI Label: flags (1) + reserved (2) + label (3)
+                label_bytes = read_bytes(value, offset + 5, 3)
+                label = (
+                    (label_bytes[0] << 12)
+                    | (label_bytes[1] << 4)
+                    | (label_bytes[2] >> 4)
+                )
+                extended_communities.append(f"EVPN-ESI-Label:{label}")
+            elif ext_subtype == 0x02:
+                # ES-Import RT: MAC address (6 bytes)
+                mac_bytes = read_bytes(value, offset + 2, 6)
+                mac = ":".join(f"{b:02x}" for b in mac_bytes)
+                extended_communities.append(f"EVPN-ES-Import:{mac}")
+            else:
+                # Unknown EVPN subtype
+                evpn_value = read_bytes(value, offset + 2, 6)
+                extended_communities.append(
+                    f"EVPN-{ext_subtype:02x}:{evpn_value.hex()}"
+                )
+
+        # Flow spec redirect (0x08)
+        elif ext_type == 0x08:
+            as_num = read_uint16(value, offset + 2)
+            assigned = read_uint32(value, offset + 4)
+            extended_communities.append(f"Redirect:{as_num}:{assigned}")
+
+        # Unknown or experimental types
+        else:
+            ext_value = read_bytes(value, offset, 8)
+            extended_communities.append(f"Unknown-{ext_type:02x}:{ext_value.hex()}")
+
+        offset += 8
+
+    return extended_communities
 
 
 def parse_route_distinguisher(value: bytes, offset: int) -> str:
@@ -633,6 +779,7 @@ def parse_bgp_update(data: bytes) -> ParsedBGPUpdate:
     med: int | None = None
     local_pref: int | None = None
     communities: list[str] | None = None
+    extended_communities: list[str] | None = None
     evpn_route_type: int | None = None
     evpn_rd: str | None = None
     evpn_esi: str | None = None
@@ -662,6 +809,8 @@ def parse_bgp_update(data: bytes) -> ParsedBGPUpdate:
                 local_pref = read_uint32(attr.value, 0)
             elif attr.type_code == BGPPathAttributeType.COMMUNITIES:
                 communities = parse_communities(attr.value)
+            elif attr.type_code == BGPPathAttributeType.EXTENDED_COMMUNITIES:
+                extended_communities = parse_extended_communities(attr.value)
             elif attr.type_code == BGPPathAttributeType.MP_REACH_NLRI:
                 afi, safi, mp_next_hop, mp_prefixes = parse_mp_reach_nlri(attr.value)
                 if mp_next_hop:
@@ -735,6 +884,7 @@ def parse_bgp_update(data: bytes) -> ParsedBGPUpdate:
         med=med,
         local_pref=local_pref,
         communities=communities,
+        extended_communities=extended_communities,
         evpn_route_type=evpn_route_type,
         evpn_rd=evpn_rd,
         evpn_esi=evpn_esi,

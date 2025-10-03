@@ -1,0 +1,14 @@
+# Docker Compose Override for Local PostgreSQL
+# This file is automatically loaded by Docker Compose when running with the local database.
+# To use an external PostgreSQL server instead:
+#   1. Rename this file (e.g., docker-compose.override.yml.disabled)
+#   2. Set DB_HOST in .env to your external PostgreSQL server
+#   3. Run: docker-compose up -d
+
+version: '3.8'
+
+services:
+  pybmpmon:
+    depends_on:
+      postgres:
+        condition: service_healthy

@@ -8,6 +8,7 @@ import sys
 import structlog
 
 from pybmpmon.config import settings
+from pybmpmon.database.migrations import initialize_database_schema
 from pybmpmon.listener import run_listener
 from pybmpmon.monitoring.logger import configure_logging
 
@@ -58,6 +59,18 @@ def main() -> None:
 
         # Setup signal handlers
         setup_signal_handlers(loop)
+
+        # Initialize database schema if needed
+        logger.info("initializing_database")
+        loop.run_until_complete(
+            initialize_database_schema(
+                host=settings.db_host,
+                port=settings.db_port,
+                database=settings.db_name,
+                user=settings.db_user,
+                password=settings.db_password,
+            )
+        )
 
         # Run the listener
         try:

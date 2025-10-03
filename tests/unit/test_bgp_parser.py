@@ -13,6 +13,7 @@ from pybmpmon.protocol.bgp_parser import (
     parse_bgp_update,
     parse_bgp_update_structure,
     parse_communities,
+    parse_extended_communities,
     parse_ipv4_prefix,
     parse_ipv6_prefix,
     parse_mp_reach_nlri,
@@ -459,3 +460,106 @@ class TestBGPUpdateStructure:
 
         with pytest.raises(BGPParseError, match="Expected UPDATE"):
             parse_bgp_update_structure(data)
+
+
+class TestExtendedCommunities:
+    """Test extended communities parsing."""
+
+    def test_parse_two_octet_as_route_target(self) -> None:
+        """Test parsing two-octet AS Route Target (type 0x00, 0x02)."""
+        # Type 0x00 (RT), Subtype 0x02, AS=42, Assigned=1
+        data = b"\x00\x02\x00\x2a\x00\x00\x00\x01"
+        communities = parse_extended_communities(data)
+
+        assert len(communities) == 1
+        assert communities[0] == "RT:42:1"
+
+    def test_parse_ipv4_address_route_target(self) -> None:
+        """Test parsing IPv4 address Route Target (type 0x01, 0x02)."""
+        # Type 0x01 (RT), Subtype 0x02, IP=10.1.0.45, Assigned=42
+        data = b"\x01\x02\x0a\x01\x00\x2d\x00\x2a"
+        communities = parse_extended_communities(data)
+
+        assert len(communities) == 1
+        assert communities[0] == "RT:10.1.0.45:42"
+
+    def test_parse_four_octet_as_route_target(self) -> None:
+        """Test parsing four-octet AS Route Target (type 0x02, 0x02)."""
+        # Type 0x02 (RT), Subtype 0x02, AS=65536, Assigned=1
+        data = b"\x02\x02\x00\x01\x00\x00\x00\x01"
+        communities = parse_extended_communities(data)
+
+        assert len(communities) == 1
+        assert communities[0] == "RT:65536:1"
+
+    def test_parse_ospf_domain_id(self) -> None:
+        """Test parsing OSPF Domain ID (type 0x03, subtype 0x0c)."""
+        # Type 0x03, Subtype 0x0c, padding + Domain ID 0.0.0.10
+        data = b"\x03\x0c\x00\x00\x00\x00\x00\x0a"
+        communities = parse_extended_communities(data)
+
+        assert len(communities) == 1
+        assert communities[0] == "OSPF-Domain:0.0.0.10"
+
+    def test_parse_evpn_mac_mobility(self) -> None:
+        """Test parsing EVPN MAC Mobility (type 0x06, subtype 0x00)."""
+        # Type 0x06, Subtype 0x00, flags=0x01, seq=12345, reserved
+        data = b"\x06\x00\x01\x00\x00\x30\x39\x00"
+        communities = parse_extended_communities(data)
+
+        assert len(communities) == 1
+        assert communities[0] == "EVPN-MAC-Mobility:12345"
+
+    def test_parse_evpn_esi_label(self) -> None:
+        """Test parsing EVPN ESI Label (type 0x06, subtype 0x01)."""
+        # Type 0x06, Subtype 0x01, flags, reserved (2), label=100 (0x000064)
+        data = b"\x06\x01\x00\x00\x00\x00\x06\x40"
+        communities = parse_extended_communities(data)
+
+        assert len(communities) == 1
+        assert communities[0] == "EVPN-ESI-Label:100"
+
+    def test_parse_evpn_es_import(self) -> None:
+        """Test parsing EVPN ES-Import Route Target (type 0x06, subtype 0x02)."""
+        # Type 0x06, Subtype 0x02, MAC=30:ce:e4:4a:13:e3
+        data = b"\x06\x02\x30\xce\xe4\x4a\x13\xe3"
+        communities = parse_extended_communities(data)
+
+        assert len(communities) == 1
+        assert communities[0] == "EVPN-ES-Import:30:ce:e4:4a:13:e3"
+
+    def test_parse_multiple_extended_communities(self) -> None:
+        """Test parsing multiple extended communities."""
+        # Two communities: RT:42:1 and OSPF-Domain:0.0.0.10
+        data = b"\x00\x02\x00\x2a\x00\x00\x00\x01"  # RT:42:1
+        data += b"\x03\x0c\x00\x00\x00\x00\x00\x0a"  # OSPF-Domain:0.0.0.10
+        communities = parse_extended_communities(data)
+
+        assert len(communities) == 2
+        assert communities[0] == "RT:42:1"
+        assert communities[1] == "OSPF-Domain:0.0.0.10"
+
+    def test_parse_unknown_extended_community(self) -> None:
+        """Test parsing unknown extended community type."""
+        # Type 0xFF (unknown), arbitrary data
+        data = b"\xff\x00\x01\x02\x03\x04\x05\x06"
+        communities = parse_extended_communities(data)
+
+        assert len(communities) == 1
+        assert communities[0].startswith("Unknown-ff:")
+
+    def test_parse_extended_communities_invalid_length(self) -> None:
+        """Test error with invalid length (not multiple of 8)."""
+        data = b"\x00\x02\x00\x2a\x00"  # Only 5 bytes
+
+        with pytest.raises(BGPParseError, match="Invalid EXTENDED_COMMUNITIES length"):
+            parse_extended_communities(data)
+
+    def test_parse_route_origin(self) -> None:
+        """Test parsing Route Origin communities (type 0x02, subtype 0x00)."""
+        # Type 0x02 (two-octet AS RO), Subtype 0x00, AS=100, Assigned=200
+        data = b"\x02\x00\x00\x64\x00\x00\x00\xc8"
+        communities = parse_extended_communities(data)
+
+        assert len(communities) == 1
+        assert communities[0] == "RO:100:200"

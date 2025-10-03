@@ -91,6 +91,7 @@ async def clean_db(db_pool):
     """Clean database tables before each test."""
     async with db_pool.get_pool().acquire() as conn:
         await conn.execute("TRUNCATE TABLE route_updates")
+        await conn.execute("TRUNCATE TABLE route_state")
         await conn.execute("TRUNCATE TABLE bmp_peers CASCADE")
         await conn.execute("TRUNCATE TABLE peer_events")
     yield

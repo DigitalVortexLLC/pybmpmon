@@ -284,12 +284,13 @@ DATABASE_USER=bmpmon
 DATABASE_PASSWORD=your-password
 ```
 
-3. Initialize the database schema:
+3. Start the application:
 
 ```bash
-# Run migration scripts
-docker-compose run --rm pybmpmon python scripts/init_db.py
+docker-compose up -d pybmpmon
 ```
+
+**Note**: The application automatically detects if the database schema exists and runs migrations if needed. No manual schema initialization is required.
 
 ### Running Without Docker
 
@@ -303,10 +304,7 @@ poetry install
 cp .env.example .env
 # Edit .env with your settings
 
-# Initialize database
-poetry run python scripts/init_db.py
-
-# Run application
+# Run application (schema initialization is automatic)
 poetry run python -m pybmpmon
 ```
 

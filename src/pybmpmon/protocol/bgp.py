@@ -118,6 +118,7 @@ class ParsedBGPUpdate(NamedTuple):
     med: int | None
     local_pref: int | None
     communities: list[str] | None
+    extended_communities: list[str] | None
 
     # EVPN-specific
     evpn_route_type: int | None
