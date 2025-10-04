@@ -1,7 +1,7 @@
 """Sentry integration helper functions.
 
 This module provides unified logging that sends messages to both stdout (via structlog)
-and Sentry (via sentry_sdk.logger).
+and Sentry (via sentry_sdk direct API calls: capture_message, capture_exception, add_breadcrumb).
 
 Usage:
     from pybmpmon.monitoring.sentry_helper import (
@@ -39,22 +39,22 @@ Usage:
         row_count=1000
     )
 
-    # Direct access to Sentry logger (advanced usage)
-    sentry_logger = get_sentry_logger()
-    if sentry_logger:
-        sentry_logger.info("Custom message {var}", var=123)
-        sentry_logger.warning(
-            "Rate limit reached for {endpoint}", endpoint="/api/results/"
+    # Direct access to Sentry SDK (advanced usage)
+    sentry_sdk = get_sentry_sdk()
+    if sentry_sdk:
+        sentry_sdk.add_breadcrumb(
+            category="custom",
+            message="Custom breadcrumb",
+            level="info",
+            data={"key": "value"}
         )
-        sentry_logger.error(
-            "Failed to process payment. Order: {order_id}", order_id="or_2342"
-        )
+        sentry_sdk.capture_message("Warning message", level="warning")
+        sentry_sdk.capture_message("Error message", level="error")
 
 Sentry Level Mapping:
-    - trace(), debug(): Not sent to Sentry (local only)
-    - info(): Sent as breadcrumbs only (provides context for errors)
-    - warning(): Sent as Sentry events (not issues)
-    - error(), fatal(): Sent as Sentry issues
+    - INFO: Sent as breadcrumbs only (provides context for errors)
+    - WARNING: Sent as Sentry events (not issues)
+    - ERROR/FATAL: Sent as Sentry issues
 """
 
 import logging
@@ -93,26 +93,15 @@ def init_sentry() -> bool:
 
     try:
         import sentry_sdk
-        from sentry_sdk.integrations.logging import LoggingIntegration
 
         _sentry_sdk = sentry_sdk
-        # Use the regular structlog logger - LoggingIntegration handles Sentry
-        _sentry_logger = logger
-
-        # Configure logging integration:
-        # - level=INFO: Capture INFO+ logs as breadcrumbs (context)
-        # - event_level=logging.WARNING: Send WARNING+ logs as events
-        # Note: Only ERROR+ become issues in Sentry UI
-        sentry_logging = LoggingIntegration(
-            level=logging.INFO,  # Breadcrumbs from INFO level
-            event_level=logging.WARNING,  # Events from WARNING level
-        )
+        # We'll use Sentry SDK directly since we use structlog (not logging module)
+        _sentry_logger = None
 
         sentry_sdk.init(
             dsn=settings.sentry_dsn,
             environment=settings.sentry_environment,
             traces_sample_rate=settings.sentry_traces_sample_rate,
-            integrations=[sentry_logging],
             max_breadcrumbs=100,
         )
 
@@ -137,18 +126,15 @@ def is_sentry_enabled() -> bool:
 
 def get_sentry_logger() -> Any:
     """
-    Get Sentry logger instance for direct logging.
+    Get Sentry logger instance (deprecated - returns None).
 
-    Returns sentry_sdk.logger which sends:
-    - trace(), debug(): Not sent to Sentry (local only)
-    - info(): Sent as breadcrumbs only
-    - warning(): Sent as Sentry events (not issues)
-    - error(), fatal(): Sent as Sentry issues
+    This function is deprecated. Use get_sentry_sdk() instead to access
+    Sentry SDK directly for capture_message(), capture_exception(), etc.
 
     Returns:
-        Sentry logger instance or None if Sentry not enabled
+        None (deprecated)
     """
-    return _sentry_logger if _sentry_enabled else None
+    return None  # Deprecated - we use Sentry SDK directly now
 
 
 def get_sentry_sdk() -> Any:
@@ -182,16 +168,16 @@ def log_peer_up_event(peer_ip: str, bgp_peer: str, bgp_peer_asn: int) -> None:
     )
 
     # Send to Sentry as breadcrumb only (if enabled)
-    if _sentry_logger:
-        msg = (
-            "BMP peer {peer_ip} established session with "
-            "BGP peer {bgp_peer} (AS{bgp_peer_asn})"
-        )
-        _sentry_logger.info(
-            msg,
-            peer_ip=peer_ip,
-            bgp_peer=bgp_peer,
-            bgp_peer_asn=bgp_peer_asn,
+    if _sentry_sdk:
+        _sentry_sdk.add_breadcrumb(
+            category="bmp.peer",
+            message=f"Peer {peer_ip} established session with BGP peer {bgp_peer} (AS{bgp_peer_asn})",
+            level="info",
+            data={
+                "peer_ip": peer_ip,
+                "bgp_peer": bgp_peer,
+                "bgp_peer_asn": bgp_peer_asn,
+            },
         )
 
 
@@ -214,11 +200,14 @@ def log_peer_down_event(peer_ip: str, reason: int) -> None:
     )
 
     # Send to Sentry as warning event (if enabled)
-    if _sentry_logger:
-        _sentry_logger.warning(
-            "BMP peer {peer_ip} disconnected (reason code: {reason_code})",
-            peer_ip=peer_ip,
-            reason_code=reason,
+    if _sentry_sdk:
+        _sentry_sdk.capture_message(
+            f"BMP peer {peer_ip} disconnected (reason code: {reason})",
+            level="warning",
+            extras={
+                "peer_ip": peer_ip,
+                "reason_code": reason,
+            },
         )
 
 
@@ -253,13 +242,18 @@ def log_parse_error(
     logger.error("parse_error", **log_data)
 
     # Send to Sentry as error issue (if enabled)
-    if _sentry_logger:
-        _sentry_logger.error(
-            "{error_type} from {peer_ip}: {error_message}",
-            error_type=error_type,
-            peer_ip=peer_ip,
-            error_message=error_message,
-            data_hex=data_hex[:512] if data_hex else None,
+    if _sentry_sdk:
+        extras = {
+            "error_type": error_type,
+            "peer_ip": peer_ip,
+        }
+        if data_hex:
+            extras["data_hex"] = data_hex[:512]  # Truncate for Sentry
+
+        _sentry_sdk.capture_message(
+            f"{error_type} from {peer_ip}: {error_message}",
+            level="error",
+            extras=extras,
         )
 
 
@@ -290,12 +284,15 @@ def log_route_processing_error(
     logger.error("route_processing_error", **log_data)
 
     # Send to Sentry as error issue (if enabled)
-    if _sentry_logger:
-        _sentry_logger.error(
-            "Route processing error from {peer_ip}: {error_message}",
-            peer_ip=peer_ip,
-            error_message=error_message,
-            route_count=route_count,
+    if _sentry_sdk:
+        extras = {"peer_ip": peer_ip}
+        if route_count is not None:
+            extras["route_count"] = route_count
+
+        _sentry_sdk.capture_message(
+            f"Route processing error from {peer_ip}: {error_message}",
+            level="error",
+            extras=extras,
         )
 
 
@@ -330,13 +327,17 @@ def log_database_error(
     logger.error("database_error", **log_data)
 
     # Send to Sentry as fatal issue (if enabled)
-    if _sentry_logger:
-        _sentry_logger.fatal(
-            "Database {operation} failed: {error_message}",
-            operation=operation,
-            error_message=error_message,
-            table=table,
-            row_count=row_count,
+    if _sentry_sdk:
+        extras = {"operation": operation}
+        if table:
+            extras["table"] = table
+        if row_count is not None:
+            extras["row_count"] = row_count
+
+        _sentry_sdk.capture_message(
+            f"Database {operation} failed: {error_message}",
+            level="fatal",
+            extras=extras,
         )
 
 
@@ -373,22 +374,25 @@ def capture_parse_error(
     logger.error("parse_error", **log_data)
 
     # Send to Sentry with exception context (if enabled)
-    if _sentry_sdk and exception:
-        with _sentry_sdk.push_scope() as scope:
-            scope.set_tag("error_type", error_type)
-            scope.set_tag("peer_ip", peer_ip)
+    if _sentry_sdk:
+        if exception:
+            # Capture exception with full context
+            with _sentry_sdk.push_scope() as scope:
+                scope.set_tag("error_type", error_type)
+                scope.set_tag("peer_ip", peer_ip)
+                if data_hex:
+                    scope.set_context("parse_data", {"hex": data_hex[:512]})
+                _sentry_sdk.capture_exception(exception)
+        else:
+            # Fallback if no exception provided - use capture_message
+            extras = {"error_type": error_type, "peer_ip": peer_ip}
             if data_hex:
-                scope.set_context("parse_data", {"hex": data_hex[:512]})
-            _sentry_sdk.capture_exception(exception)
-    elif _sentry_logger:
-        # Fallback if no exception provided
-        _sentry_logger.error(
-            "{error_type} from {peer_ip}: {error_message}",
-            error_type=error_type,
-            peer_ip=peer_ip,
-            error_message=error_message,
-            data_hex=data_hex[:512] if data_hex else None,
-        )
+                extras["data_hex"] = data_hex[:512]
+            _sentry_sdk.capture_message(
+                f"{error_type} from {peer_ip}: {error_message}",
+                level="error",
+                extras=extras,
+            )
 
 
 def capture_peer_up_event(peer_ip: str, bgp_peer: str, bgp_peer_asn: int) -> None:
