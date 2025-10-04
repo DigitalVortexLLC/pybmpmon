@@ -42,8 +42,12 @@ Usage:
     sentry_logger = get_sentry_logger()
     if sentry_logger:
         sentry_logger.info("Custom message {var}", var=123)
-        sentry_logger.warning("Rate limit reached for {endpoint}", endpoint="/api/results/")
-        sentry_logger.error("Failed to process payment. Order: {order_id}", order_id="or_2342")
+        sentry_logger.warning(
+            "Rate limit reached for {endpoint}", endpoint="/api/results/"
+        )
+        sentry_logger.error(
+            "Failed to process payment. Order: {order_id}", order_id="or_2342"
+        )
 
 Sentry Level Mapping:
     - trace(), debug(): Not sent to Sentry (local only)
@@ -88,19 +92,19 @@ def init_sentry() -> bool:
 
     try:
         import sentry_sdk
-        from sentry_sdk import logger as sentry_logger
         from sentry_sdk.integrations.logging import LoggingIntegration
 
         _sentry_sdk = sentry_sdk
-        _sentry_logger = sentry_logger
+        # Use the regular structlog logger - LoggingIntegration handles Sentry
+        _sentry_logger = logger
 
         # Configure logging integration:
         # - level=INFO: Capture INFO+ logs as breadcrumbs (context)
-        # - event_level=logging.WARNING: Send WARNING+ logs as Sentry events
+        # - event_level=logging.WARNING: Send WARNING+ logs as events
         # Note: Only ERROR+ become issues in Sentry UI
         sentry_logging = LoggingIntegration(
             level=logging.INFO,  # Breadcrumbs from INFO level
-            event_level=logging.WARNING,  # Events from WARNING level (ERROR+ become issues)
+            event_level=logging.WARNING,  # Events from WARNING level
         )
 
         sentry_sdk.init(
@@ -108,8 +112,6 @@ def init_sentry() -> bool:
             environment=settings.sentry_environment,
             traces_sample_rate=settings.sentry_traces_sample_rate,
             integrations=[sentry_logging],
-            # Capture all logs as breadcrumbs
-            enable_logs=True,
             max_breadcrumbs=100,
         )
 
@@ -132,7 +134,7 @@ def is_sentry_enabled() -> bool:
     return _sentry_enabled
 
 
-def get_sentry_logger():
+def get_sentry_logger() -> Any:
     """
     Get Sentry logger instance for direct logging.
 
@@ -170,8 +172,12 @@ def log_peer_up_event(peer_ip: str, bgp_peer: str, bgp_peer_asn: int) -> None:
 
     # Send to Sentry as breadcrumb only (if enabled)
     if _sentry_logger:
+        msg = (
+            "BMP peer {peer_ip} established session with "
+            "BGP peer {bgp_peer} (AS{bgp_peer_asn})"
+        )
         _sentry_logger.info(
-            "BMP peer {peer_ip} established session with BGP peer {bgp_peer} (AS{bgp_peer_asn})",
+            msg,
             peer_ip=peer_ip,
             bgp_peer=bgp_peer,
             bgp_peer_asn=bgp_peer_asn,
@@ -263,7 +269,7 @@ def log_route_processing_error(
         route_count: Number of routes being processed (optional)
     """
     # Always log to stdout via structlog
-    log_data = {
+    log_data: dict[str, Any] = {
         "peer_ip": peer_ip,
         "error": error_message,
     }
@@ -301,7 +307,7 @@ def log_database_error(
         row_count: Number of rows being processed (optional)
     """
     # Always log to stdout via structlog
-    log_data = {
+    log_data: dict[str, Any] = {
         "operation": operation,
         "error": error_message,
     }

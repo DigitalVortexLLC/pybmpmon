@@ -381,6 +381,7 @@ class BMPListener:
                 next_hop=bgp_update.next_hop,  # type: ignore[arg-type]
                 as_path=bgp_update.as_path,
                 communities=bgp_update.communities,
+                extended_communities=bgp_update.extended_communities,
                 med=bgp_update.med,
                 local_pref=bgp_update.local_pref,
                 is_withdrawn=False,
@@ -422,6 +423,7 @@ class BMPListener:
                 next_hop=None,
                 as_path=None,
                 communities=None,
+                extended_communities=None,
                 med=None,
                 local_pref=None,
                 is_withdrawn=True,

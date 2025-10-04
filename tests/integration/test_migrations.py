@@ -152,9 +152,7 @@ class TestDatabaseMigrations:
         finally:
             await conn.close()
 
-    async def test_initialize_database_schema_existing_schema(
-        self, postgres_container
-    ):
+    async def test_initialize_database_schema_existing_schema(self, postgres_container):
         """Test initialize_database_schema on database with existing schema."""
         connection_url = postgres_container.get_connection_url()
 

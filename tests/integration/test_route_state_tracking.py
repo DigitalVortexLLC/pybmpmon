@@ -111,7 +111,8 @@ class TestRouteStateTracking:
             async with db_pool.get_pool().acquire() as conn:
                 row = await conn.fetchrow(
                     """
-                    SELECT first_seen, last_seen, is_withdrawn, learn_count, withdraw_count
+                    SELECT first_seen, last_seen, is_withdrawn,
+                           learn_count, withdraw_count
                     FROM route_state
                     WHERE bmp_peer_ip = $1 AND bgp_peer_ip = $2 AND prefix = $3
                     """,
@@ -162,7 +163,7 @@ class TestRouteStateTracking:
             assert row["first_seen"] == first_seen
             assert row["last_seen"] > first_seen
             assert row["learn_count"] == 1  # Still 1, not withdrawn then re-learned
-            assert row["next_hop"] == "192.0.2.4"  # Updated next hop
+            assert str(row["next_hop"]) == "192.0.2.4"  # Updated next hop
 
         finally:
             await batch_writer.stop()
@@ -262,7 +263,8 @@ class TestRouteStateTracking:
             async with db_pool.get_pool().acquire() as conn:
                 row = await conn.fetchrow(
                     """
-                    SELECT is_withdrawn, learn_count, withdraw_count, last_state_change, next_hop
+                    SELECT is_withdrawn, learn_count, withdraw_count,
+                           last_state_change, next_hop
                     FROM route_state
                     WHERE bmp_peer_ip = $1 AND bgp_peer_ip = $2 AND prefix = $3
                     """,
@@ -275,7 +277,7 @@ class TestRouteStateTracking:
             assert row["learn_count"] == 2  # Incremented on relearn
             assert row["withdraw_count"] == 1
             assert row["last_state_change"] > second_state_change
-            assert row["next_hop"] == "192.0.2.5"
+            assert str(row["next_hop"]) == "192.0.2.5"
 
             # 4. Withdraw again
             await asyncio.sleep(0.1)

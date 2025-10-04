@@ -23,6 +23,10 @@ async def test_batch_writer_throughput():
             # Simulate some processing time
             await asyncio.sleep(0.001)  # 1ms per batch
 
+        async def execute(self, query, *args):
+            # Mock execute for route state updates
+            pass
+
     class MockPoolContext:
         def __init__(self, conn):
             self.conn = conn
@@ -100,6 +104,10 @@ async def test_batch_writer_timeout_flush():
         async def copy_records_to_table(self, table, records, columns):
             self.pool.flush_count += 1
 
+        async def execute(self, query, *args):
+            # Mock execute for route state updates
+            pass
+
     class MockPoolContext:
         def __init__(self, conn):
             self.conn = conn
@@ -155,6 +163,10 @@ async def test_batch_writer_size_flush():
 
         async def copy_records_to_table(self, table, records, columns):
             self.pool.flush_count += 1
+
+        async def execute(self, query, *args):
+            # Mock execute for route state updates
+            pass
 
     class MockPoolContext:
         def __init__(self, conn):

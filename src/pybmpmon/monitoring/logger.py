@@ -69,10 +69,12 @@ def configure_logging() -> structlog.BoundLogger:
 
     logger = structlog.get_logger()
     if sentry_enabled:
-        logger.info("sentry_logging_enabled",
-                    breadcrumbs="INFO+",
-                    events="WARNING+",
-                    issues="ERROR+")
+        logger.info(
+            "sentry_logging_enabled",
+            breadcrumbs="INFO+",
+            events="WARNING+",
+            issues="ERROR+",
+        )
 
     return logger  # type: ignore[no-any-return]
 
