@@ -1,7 +1,8 @@
 """Sentry integration helper functions.
 
-This module provides unified logging that sends messages to both stdout (via structlog)
-and Sentry (via sentry_sdk direct API calls: capture_message, capture_exception, add_breadcrumb).
+This module provides unified logging that sends messages to both stdout
+(via structlog) and Sentry (via sentry_sdk direct API calls: capture_message,
+capture_exception, add_breadcrumb).
 
 Usage:
     from pybmpmon.monitoring.sentry_helper import (
@@ -57,7 +58,6 @@ Sentry Level Mapping:
     - ERROR/FATAL: Sent as Sentry issues
 """
 
-import logging
 from typing import Any
 
 import structlog
@@ -169,9 +169,13 @@ def log_peer_up_event(peer_ip: str, bgp_peer: str, bgp_peer_asn: int) -> None:
 
     # Send to Sentry as breadcrumb only (if enabled)
     if _sentry_sdk:
+        msg = (
+            f"Peer {peer_ip} established session with "
+            f"BGP peer {bgp_peer} (AS{bgp_peer_asn})"
+        )
         _sentry_sdk.add_breadcrumb(
             category="bmp.peer",
-            message=f"Peer {peer_ip} established session with BGP peer {bgp_peer} (AS{bgp_peer_asn})",
+            message=msg,
             level="info",
             data={
                 "peer_ip": peer_ip,
@@ -285,7 +289,7 @@ def log_route_processing_error(
 
     # Send to Sentry as error issue (if enabled)
     if _sentry_sdk:
-        extras = {"peer_ip": peer_ip}
+        extras: dict[str, Any] = {"peer_ip": peer_ip}
         if route_count is not None:
             extras["route_count"] = route_count
 
@@ -328,7 +332,7 @@ def log_database_error(
 
     # Send to Sentry as fatal issue (if enabled)
     if _sentry_sdk:
-        extras = {"operation": operation}
+        extras: dict[str, Any] = {"operation": operation}
         if table:
             extras["table"] = table
         if row_count is not None:

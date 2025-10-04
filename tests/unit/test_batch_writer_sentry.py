@@ -5,7 +5,6 @@ from datetime import UTC, datetime
 from unittest import mock
 
 import pytest
-
 from pybmpmon.database.batch_writer import BatchWriter
 from pybmpmon.models.route import RouteUpdate
 from pybmpmon.monitoring import sentry_helper
@@ -84,9 +83,7 @@ async def test_batch_writer_creates_sentry_span():
             mock_span.set_data.assert_any_call("db.operation", "COPY")
 
             # Verify other span data was set (duration, throughput, totals)
-            set_data_calls = [
-                call[0][0] for call in mock_span.set_data.call_args_list
-            ]
+            set_data_calls = [call[0][0] for call in mock_span.set_data.call_args_list]
             assert "batch.duration_ms" in set_data_calls
             assert "batch.routes_per_second" in set_data_calls
             assert "total.routes_written" in set_data_calls
