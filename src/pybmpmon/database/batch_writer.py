@@ -8,6 +8,7 @@ import asyncpg  # type: ignore[import-untyped]
 from pybmpmon.database.schema import TABLE_ROUTE_UPDATES
 from pybmpmon.models.route import RouteUpdate
 from pybmpmon.monitoring.logger import get_logger
+from pybmpmon.monitoring.sentry_helper import get_sentry_sdk
 
 logger = get_logger(__name__)
 
@@ -135,85 +136,18 @@ class BatchWriter:
         batch_count = len(self.batch)
         start_time = asyncio.get_event_loop().time()
 
+        # Get Sentry SDK for span tracking (if enabled)
+        sentry_sdk = get_sentry_sdk()
+
         try:
-            async with self.pool.acquire() as conn:
-                # Use fast binary COPY (mac_address is TEXT so binary works)
-                await conn.copy_records_to_table(
-                    TABLE_ROUTE_UPDATES,
-                    records=self.batch,
-                    columns=[
-                        "time",
-                        "bmp_peer_ip",
-                        "bmp_peer_asn",
-                        "bgp_peer_ip",
-                        "bgp_peer_asn",
-                        "family",
-                        "prefix",
-                        "next_hop",
-                        "as_path",
-                        "communities",
-                        "extended_communities",
-                        "med",
-                        "local_pref",
-                        "is_withdrawn",
-                        "evpn_route_type",
-                        "evpn_rd",
-                        "evpn_esi",
-                        "mac_address",
-                    ],
-                )
-
-                # Update route state tracking for each route in batch
-                for route_tuple in self.batch:
-                    await conn.execute(
-                        """
-                        SELECT update_route_state(
-                            $1::TIMESTAMPTZ,
-                            $2::INET,
-                            $3::INET,
-                            $4::TEXT,
-                            $5::CIDR,
-                            $6::INET,
-                            $7::INTEGER[],
-                            $8::TEXT[],
-                            $9::TEXT[],
-                            $10::INTEGER,
-                            $11::INTEGER,
-                            $12::BOOLEAN,
-                            $13::INTEGER,
-                            $14::TEXT,
-                            $15::TEXT,
-                            $16::TEXT
-                        )
-                        """,
-                        route_tuple[0],  # time
-                        route_tuple[1],  # bmp_peer_ip
-                        route_tuple[3],  # bgp_peer_ip
-                        route_tuple[5],  # family
-                        route_tuple[6],  # prefix
-                        route_tuple[7],  # next_hop
-                        route_tuple[8],  # as_path
-                        route_tuple[9],  # communities
-                        route_tuple[10],  # extended_communities
-                        route_tuple[11],  # med
-                        route_tuple[12],  # local_pref
-                        route_tuple[13],  # is_withdrawn
-                        route_tuple[14],  # evpn_route_type
-                        route_tuple[15],  # evpn_rd
-                        route_tuple[16],  # evpn_esi
-                        route_tuple[17],  # mac_address
-                    )
-
-            elapsed = (asyncio.get_event_loop().time() - start_time) * 1000
-            self.total_routes_written += batch_count
-            self.total_batches_written += 1
-
-            logger.debug(
-                "batch_flushed",
-                routes=batch_count,
-                duration_ms=f"{elapsed:.2f}",
-                total_routes=self.total_routes_written,
-            )
+            # Create Sentry span for this batch operation
+            if sentry_sdk:
+                with sentry_sdk.start_span(
+                    op="db.batch_write", description="Batch write routes to database"
+                ) as span:
+                    await self._flush_batch(batch_count, start_time, span)
+            else:
+                await self._flush_batch(batch_count, start_time, None)
 
         except Exception as e:
             logger.error(
@@ -227,6 +161,101 @@ class BatchWriter:
             # Clear batch
             self.batch = []
             self.batch_start_time = None
+
+    async def _flush_batch(
+        self, batch_count: int, start_time: float, span: Any
+    ) -> None:
+        """Internal method to flush batch with optional Sentry span tracking."""
+        async with self.pool.acquire() as conn:
+            # Use fast binary COPY (mac_address is TEXT so binary works)
+            await conn.copy_records_to_table(
+                TABLE_ROUTE_UPDATES,
+                records=self.batch,
+                columns=[
+                    "time",
+                    "bmp_peer_ip",
+                    "bmp_peer_asn",
+                    "bgp_peer_ip",
+                    "bgp_peer_asn",
+                    "family",
+                    "prefix",
+                    "next_hop",
+                    "as_path",
+                    "communities",
+                    "extended_communities",
+                    "med",
+                    "local_pref",
+                    "is_withdrawn",
+                    "evpn_route_type",
+                    "evpn_rd",
+                    "evpn_esi",
+                    "mac_address",
+                ],
+            )
+
+            # Update route state tracking for each route in batch
+            for route_tuple in self.batch:
+                await conn.execute(
+                    """
+                    SELECT update_route_state(
+                        $1::TIMESTAMPTZ,
+                        $2::INET,
+                        $3::INET,
+                        $4::TEXT,
+                        $5::CIDR,
+                        $6::INET,
+                        $7::INTEGER[],
+                        $8::TEXT[],
+                        $9::TEXT[],
+                        $10::INTEGER,
+                        $11::INTEGER,
+                        $12::BOOLEAN,
+                        $13::INTEGER,
+                        $14::TEXT,
+                        $15::TEXT,
+                        $16::TEXT
+                    )
+                    """,
+                    route_tuple[0],  # time
+                    route_tuple[1],  # bmp_peer_ip
+                    route_tuple[3],  # bgp_peer_ip
+                    route_tuple[5],  # family
+                    route_tuple[6],  # prefix
+                    route_tuple[7],  # next_hop
+                    route_tuple[8],  # as_path
+                    route_tuple[9],  # communities
+                    route_tuple[10],  # extended_communities
+                    route_tuple[11],  # med
+                    route_tuple[12],  # local_pref
+                    route_tuple[13],  # is_withdrawn
+                    route_tuple[14],  # evpn_route_type
+                    route_tuple[15],  # evpn_rd
+                    route_tuple[16],  # evpn_esi
+                    route_tuple[17],  # mac_address
+                )
+
+        elapsed = (asyncio.get_event_loop().time() - start_time) * 1000
+        self.total_routes_written += batch_count
+        self.total_batches_written += 1
+
+        # Set span data with all debug statistics
+        if span:
+            span.set_data("batch.routes_count", batch_count)
+            span.set_data("batch.duration_ms", round(elapsed, 2))
+            span.set_data(
+                "batch.routes_per_second", round(batch_count / (elapsed / 1000), 2)
+            )
+            span.set_data("total.routes_written", self.total_routes_written)
+            span.set_data("total.batches_written", self.total_batches_written)
+            span.set_data("db.table", TABLE_ROUTE_UPDATES)
+            span.set_data("db.operation", "COPY")
+
+        logger.debug(
+            "batch_flushed",
+            routes=batch_count,
+            duration_ms=f"{elapsed:.2f}",
+            total_routes=self.total_routes_written,
+        )
 
     async def _periodic_flush(self) -> None:
         """Periodically flush batch based on timeout."""

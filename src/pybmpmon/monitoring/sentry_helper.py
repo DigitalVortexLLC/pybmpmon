@@ -14,6 +14,7 @@ Usage:
         capture_peer_up_event,
         capture_peer_down_event,
         get_sentry_logger,
+        get_sentry_sdk,
     )
 
     # Log peer events (INFO level -> breadcrumbs only)
@@ -148,6 +149,16 @@ def get_sentry_logger() -> Any:
         Sentry logger instance or None if Sentry not enabled
     """
     return _sentry_logger if _sentry_enabled else None
+
+
+def get_sentry_sdk() -> Any:
+    """
+    Get Sentry SDK instance for direct use (spans, transactions, etc.).
+
+    Returns:
+        Sentry SDK instance or None if Sentry not enabled
+    """
+    return _sentry_sdk if _sentry_enabled else None
 
 
 def log_peer_up_event(peer_ip: str, bgp_peer: str, bgp_peer_asn: int) -> None:

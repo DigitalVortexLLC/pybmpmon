@@ -254,3 +254,17 @@ class TestSentryEnabled:
         """Test getting Sentry logger instance."""
         logger = sentry_helper.get_sentry_logger()
         assert logger is self.mock_sentry_logger
+
+    def test_get_sentry_sdk(self):
+        """Test getting Sentry SDK instance."""
+        sdk = sentry_helper.get_sentry_sdk()
+        assert sdk is self.mock_sentry
+
+    def test_get_sentry_sdk_when_disabled(self):
+        """Test that get_sentry_sdk returns None when disabled."""
+        # Temporarily disable
+        sentry_helper._sentry_enabled = False
+        sdk = sentry_helper.get_sentry_sdk()
+        assert sdk is None
+        # Re-enable for other tests
+        sentry_helper._sentry_enabled = True
