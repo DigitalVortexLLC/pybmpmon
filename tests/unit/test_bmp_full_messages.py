@@ -434,7 +434,7 @@ class TestStatisticsReportMessage:
         data.extend(b"\x00\x07")  # Type = ROUTES_ADJ_RIB_IN
         data.extend(b"\x00\x08")  # Length = 8
         data.extend(b"\x00\x00\x00\x00")  # High 32 bits = 0
-        data.extend(b"\x00\x10\xC8\xE0")  # Low 32 bits = 1,100,000
+        data.extend(b"\x00\x10\xc8\xe0")  # Low 32 bits = 1,100,000
 
         # Stat 4: Number of routes in Loc-RIB (64-bit)
         data.extend(b"\x00\x08")  # Type = ROUTES_LOC_RIB
