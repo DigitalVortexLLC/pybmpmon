@@ -113,9 +113,6 @@ class TestMigrationRunner:
         migration_file = tmp_path / "001_test.sql"
         migration_file.write_text("SELECT 1;")
 
-        migration = Migration(version=1, name="test", file_path=migration_file)
-        original_checksum = migration.checksum  # noqa: F841
-
         # Mock pool that returns different checksum
         mock_conn = mock.MagicMock()
         mock_conn.fetchval = mock.AsyncMock(return_value=True)

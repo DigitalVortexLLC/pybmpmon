@@ -1,6 +1,7 @@
 """Database migration system with tracking and validation."""
 
 import hashlib
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -142,8 +143,6 @@ class MigrationRunner:
         Raises:
             Exception: If migration fails
         """
-        import time
-
         start_time = time.time()
 
         logger.info(

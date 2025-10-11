@@ -66,10 +66,12 @@ Optimizes TimescaleDB compression settings for better space savings.
 SELECT remove_compression_policy('route_updates', if_exists => true);
 
 -- Update compression settings with better column ordering
+-- Note: 'family' is in segmentby, so it cannot also be in orderby
+-- (TimescaleDB constraint: columns cannot be in both)
 ALTER TABLE route_updates SET (
     timescaledb.compress,
     timescaledb.compress_segmentby = 'bmp_peer_ip, bgp_peer_ip, family',
-    timescaledb.compress_orderby = 'time DESC, family, prefix'
+    timescaledb.compress_orderby = 'time DESC, prefix'
 );
 
 -- Add compression policy: compress chunks older than 7 days
