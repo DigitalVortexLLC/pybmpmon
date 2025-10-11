@@ -136,6 +136,14 @@ class BatchWriter:
         batch_count = len(self.batch)
         start_time = asyncio.get_event_loop().time()
 
+        # Calculate flush trigger (size or timeout)
+        flush_trigger = "size" if batch_count >= self.batch_size else "timeout"
+
+        # Calculate batch wait time (if applicable)
+        batch_wait_time = None
+        if self.batch_start_time is not None:
+            batch_wait_time = (start_time - self.batch_start_time) * 1000  # ms
+
         # Get Sentry SDK for span tracking (if enabled)
         sentry_sdk = get_sentry_sdk()
 
@@ -145,9 +153,13 @@ class BatchWriter:
                 with sentry_sdk.start_span(
                     op="db.batch_write", description="Batch write routes to database"
                 ) as span:
-                    await self._flush_batch(batch_count, start_time, span)
+                    await self._flush_batch(
+                        batch_count, start_time, flush_trigger, batch_wait_time, span
+                    )
             else:
-                await self._flush_batch(batch_count, start_time, None)
+                await self._flush_batch(
+                    batch_count, start_time, flush_trigger, batch_wait_time, None
+                )
 
         except Exception as e:
             logger.error(
@@ -163,7 +175,12 @@ class BatchWriter:
             self.batch_start_time = None
 
     async def _flush_batch(
-        self, batch_count: int, start_time: float, span: Any
+        self,
+        batch_count: int,
+        start_time: float,
+        flush_trigger: str,
+        batch_wait_time: float | None,
+        span: Any,
     ) -> None:
         """Internal method to flush batch with optional Sentry span tracking."""
         async with self.pool.acquire() as conn:
@@ -238,15 +255,36 @@ class BatchWriter:
         self.total_routes_written += batch_count
         self.total_batches_written += 1
 
-        # Set span data with all debug statistics
+        # Calculate batch utilization (percentage of max batch size)
+        batch_utilization = (batch_count / self.batch_size) * 100
+
+        # Calculate average batch size
+        avg_batch_size = (
+            self.total_routes_written / self.total_batches_written
+            if self.total_batches_written > 0
+            else 0
+        )
+
+        # Set span data with comprehensive metrics for tracking over time
         if span:
+            # Batch-level metrics (current operation)
             span.set_data("batch.routes_count", batch_count)
             span.set_data("batch.duration_ms", round(elapsed, 2))
             span.set_data(
                 "batch.routes_per_second", round(batch_count / (elapsed / 1000), 2)
             )
+            span.set_data("batch.size_max", self.batch_size)
+            span.set_data("batch.utilization_percent", round(batch_utilization, 2))
+            span.set_data("batch.flush_trigger", flush_trigger)
+            if batch_wait_time is not None:
+                span.set_data("batch.wait_time_ms", round(batch_wait_time, 2))
+
+            # Cumulative metrics (all-time totals)
             span.set_data("total.routes_written", self.total_routes_written)
             span.set_data("total.batches_written", self.total_batches_written)
+            span.set_data("total.avg_batch_size", round(avg_batch_size, 2))
+
+            # Database operation metadata
             span.set_data("db.table", TABLE_ROUTE_UPDATES)
             span.set_data("db.operation", "COPY")
 
@@ -255,6 +293,9 @@ class BatchWriter:
             routes=batch_count,
             duration_ms=f"{elapsed:.2f}",
             total_routes=self.total_routes_written,
+            total_batches=self.total_batches_written,
+            avg_batch_size=f"{avg_batch_size:.2f}",
+            flush_trigger=flush_trigger,
         )
 
     async def _periodic_flush(self) -> None:

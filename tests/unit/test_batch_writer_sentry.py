@@ -82,12 +82,26 @@ async def test_batch_writer_creates_sentry_span():
             mock_span.set_data.assert_any_call("db.table", "route_updates")
             mock_span.set_data.assert_any_call("db.operation", "COPY")
 
-            # Verify other span data was set (duration, throughput, totals)
+            # Verify all span data keys are present
             set_data_calls = [call[0][0] for call in mock_span.set_data.call_args_list]
+
+            # Batch-level metrics
+            assert "batch.routes_count" in set_data_calls
             assert "batch.duration_ms" in set_data_calls
             assert "batch.routes_per_second" in set_data_calls
+            assert "batch.size_max" in set_data_calls
+            assert "batch.utilization_percent" in set_data_calls
+            assert "batch.flush_trigger" in set_data_calls
+            assert "batch.wait_time_ms" in set_data_calls
+
+            # Cumulative metrics
             assert "total.routes_written" in set_data_calls
             assert "total.batches_written" in set_data_calls
+            assert "total.avg_batch_size" in set_data_calls
+
+            # Database metadata
+            assert "db.table" in set_data_calls
+            assert "db.operation" in set_data_calls
 
         finally:
             await batch_writer.stop()

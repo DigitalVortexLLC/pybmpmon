@@ -1,61 +1,54 @@
 """Sentry integration helper functions.
 
-This module provides unified logging that sends messages to both stdout
-(via structlog) and Sentry (via sentry_sdk direct API calls: capture_message,
-capture_exception, add_breadcrumb).
+This module configures Sentry with LoggingIntegration, which automatically captures
+logs from Python's logging module (which structlog writes to). This means:
+
+1. All structlog logs at INFO+ level are automatically sent to Sentry as breadcrumbs
+2. All structlog logs at ERROR+ level are automatically sent to Sentry as issues
+3. No manual capture_message() calls needed for standard logging
+
+Additionally, this module provides helper functions for:
+- Adding structured context to Sentry issues
+- Manual exception capture with custom context
+- Direct access to Sentry SDK for advanced features (spans, transactions, etc.)
 
 Usage:
+    # Standard logging (automatically captured by Sentry via LoggingIntegration)
+    from pybmpmon.monitoring.logger import get_logger
+
+    logger = get_logger(__name__)
+    logger.info("peer_connected", peer="192.0.2.1")  # → Sentry breadcrumb
+    # → Sentry issue
+    logger.error("parse_error", peer="192.0.2.1", error="Invalid data")
+
+    # Advanced usage: Manual exception capture with context
     from pybmpmon.monitoring.sentry_helper import (
-        log_peer_up_event,
-        log_peer_down_event,
-        log_parse_error,
-        log_route_processing_error,
-        log_database_error,
         capture_parse_error,
-        capture_peer_up_event,
-        capture_peer_down_event,
-        get_sentry_logger,
         get_sentry_sdk,
     )
 
-    # Log peer events (INFO level -> breadcrumbs only)
-    log_peer_up_event(peer_ip="192.0.2.1", bgp_peer="192.0.2.100", bgp_peer_asn=65001)
+    try:
+        parse_bmp_message(data)
+    except BMPParseError as e:
+        capture_parse_error(
+            error_type="bmp_parse_error",
+            peer_ip="192.0.2.1",
+            error_message=str(e),
+            data_hex=data.hex(),
+            exception=e  # Full exception context in Sentry
+        )
 
-    # Log peer down (WARNING level -> Sentry events, not issues)
-    log_peer_down_event(peer_ip="192.0.2.1", reason=1)
-
-    # Log errors (ERROR level -> Sentry issues)
-    log_parse_error(
-        error_type="bmp_parse_error",
-        peer_ip="192.0.2.1",
-        error_message="Invalid message",
-        data_hex="0300000006"
-    )
-
-    # Log critical database errors (FATAL level -> critical Sentry issues)
-    log_database_error(
-        operation="COPY",
-        error_message="Connection pool exhausted",
-        table="route_updates",
-        row_count=1000
-    )
-
-    # Direct access to Sentry SDK (advanced usage)
+    # Direct access to Sentry SDK (for spans, transactions, etc.)
     sentry_sdk = get_sentry_sdk()
     if sentry_sdk:
-        sentry_sdk.add_breadcrumb(
-            category="custom",
-            message="Custom breadcrumb",
-            level="info",
-            data={"key": "value"}
-        )
-        sentry_sdk.capture_message("Warning message", level="warning")
-        sentry_sdk.capture_message("Error message", level="error")
+        with sentry_sdk.start_span(op="db.query", description="Fetch routes"):
+            # Your code here
+            pass
 
-Sentry Level Mapping:
-    - INFO: Sent as breadcrumbs only (provides context for errors)
-    - WARNING: Sent as Sentry events (not issues)
-    - ERROR/FATAL: Sent as Sentry issues
+Sentry Level Mapping (via LoggingIntegration):
+    - DEBUG: Not sent to Sentry (local only)
+    - INFO: Captured as breadcrumbs (provides context for errors)
+    - ERROR: Captured as Sentry issues
 """
 
 from typing import Any
@@ -76,10 +69,9 @@ def init_sentry() -> bool:
     """
     Initialize Sentry SDK if configured.
 
-    Logging integration:
+    Logging integration (via LoggingIntegration):
     - TRACE and DEBUG: Not sent to Sentry (local only)
     - INFO and above: Captured as breadcrumbs (provides context for errors)
-    - WARNING and above: Sent as events to Sentry (not issues)
     - ERROR and above: Sent as issues to Sentry
 
     Returns:
@@ -92,17 +84,27 @@ def init_sentry() -> bool:
         return False
 
     try:
+        import logging as stdlib_logging
+
         import sentry_sdk
+        from sentry_sdk.integrations.logging import LoggingIntegration
 
         _sentry_sdk = sentry_sdk
-        # We'll use Sentry SDK directly since we use structlog (not logging module)
-        _sentry_logger = None
+
+        # Configure LoggingIntegration
+        # This automatically captures logs from Python's logging module
+        # (which structlog writes to via LoggerFactory)
+        sentry_logging = LoggingIntegration(
+            level=stdlib_logging.INFO,  # Capture INFO+ as breadcrumbs
+            event_level=stdlib_logging.ERROR,  # Capture ERROR+ as events/issues
+        )
 
         sentry_sdk.init(
             dsn=settings.sentry_dsn,
             environment=settings.sentry_environment,
             traces_sample_rate=settings.sentry_traces_sample_rate,
             max_breadcrumbs=100,
+            integrations=[sentry_logging],
         )
 
         _sentry_enabled = True
@@ -149,17 +151,18 @@ def get_sentry_sdk() -> Any:
 
 def log_peer_up_event(peer_ip: str, bgp_peer: str, bgp_peer_asn: int) -> None:
     """
-    Log BMP peer up event to both stdout and Sentry.
+    Log BMP peer up event to stdout (automatically sent to Sentry as breadcrumb).
 
-    INFO level events are sent to Sentry as breadcrumbs (not issues).
-    Use this for informational events that provide context.
+    INFO level logs are automatically captured by Sentry's LoggingIntegration
+    as breadcrumbs (not issues). They provide context for later errors.
 
     Args:
         peer_ip: BMP peer IP address
         bgp_peer: BGP peer IP address
         bgp_peer_asn: BGP peer ASN
     """
-    # Always log to stdout via structlog
+    # Log to stdout via structlog
+    # LoggingIntegration automatically sends INFO+ to Sentry as breadcrumbs
     logger.info(
         "peer_up",
         bmp_peer=peer_ip,
@@ -167,52 +170,25 @@ def log_peer_up_event(peer_ip: str, bgp_peer: str, bgp_peer_asn: int) -> None:
         bgp_peer_asn=bgp_peer_asn,
     )
 
-    # Send to Sentry as breadcrumb only (if enabled)
-    if _sentry_sdk:
-        msg = (
-            f"Peer {peer_ip} established session with "
-            f"BGP peer {bgp_peer} (AS{bgp_peer_asn})"
-        )
-        _sentry_sdk.add_breadcrumb(
-            category="bmp.peer",
-            message=msg,
-            level="info",
-            data={
-                "peer_ip": peer_ip,
-                "bgp_peer": bgp_peer,
-                "bgp_peer_asn": bgp_peer_asn,
-            },
-        )
-
 
 def log_peer_down_event(peer_ip: str, reason: int) -> None:
     """
-    Log BMP peer down event to both stdout and Sentry.
+    Log BMP peer down event to stdout (automatically sent to Sentry as breadcrumb).
 
-    WARNING level events are sent to Sentry as events (not issues).
-    Use this for noteworthy events that aren't errors.
+    INFO level logs are automatically captured by Sentry's LoggingIntegration
+    as breadcrumbs. Peer disconnections are normal operational events, not errors.
 
     Args:
         peer_ip: BMP peer IP address
         reason: Peer down reason code
     """
-    # Always log to stdout via structlog
-    logger.warning(
+    # Log to stdout via structlog
+    # LoggingIntegration automatically sends INFO+ to Sentry as breadcrumbs
+    logger.info(
         "peer_down",
         bmp_peer=peer_ip,
         reason_code=reason,
     )
-
-    # Send to Sentry as warning event (if enabled)
-    if _sentry_sdk:
-        _sentry_sdk.capture_message(
-            f"BMP peer {peer_ip} disconnected (reason code: {reason})",
-            level="warning",
-            extras={
-                "peer_ip": peer_ip,
-                "reason_code": reason,
-            },
-        )
 
 
 def log_parse_error(
@@ -222,10 +198,10 @@ def log_parse_error(
     data_hex: str | None = None,
 ) -> None:
     """
-    Log parse error to both stdout and Sentry.
+    Log parse error to stdout (automatically sent to Sentry as issue).
 
-    ERROR level events are sent to Sentry as issues.
-    Use this for actual errors that need attention.
+    ERROR level logs are automatically captured by Sentry's LoggingIntegration
+    as issues. All structured log data is included in the Sentry event.
 
     Args:
         error_type: Type of error (bmp_parse_error, bgp_parse_error, etc.)
@@ -233,32 +209,18 @@ def log_parse_error(
         error_message: Error message
         data_hex: Hex dump of problematic data (optional)
     """
-    # Always log to stdout via structlog
+    # Log to stdout via structlog
+    # LoggingIntegration automatically sends ERROR+ to Sentry as issues
     log_data = {
         "error_type": error_type,
         "peer_ip": peer_ip,
         "error": error_message,
     }
     if data_hex:
-        # Truncate hex data (first 256 chars for stdout)
+        # Truncate hex data (first 256 chars for stdout/Sentry)
         log_data["data_hex"] = data_hex[:256]
 
     logger.error("parse_error", **log_data)
-
-    # Send to Sentry as error issue (if enabled)
-    if _sentry_sdk:
-        extras = {
-            "error_type": error_type,
-            "peer_ip": peer_ip,
-        }
-        if data_hex:
-            extras["data_hex"] = data_hex[:512]  # Truncate for Sentry
-
-        _sentry_sdk.capture_message(
-            f"{error_type} from {peer_ip}: {error_message}",
-            level="error",
-            extras=extras,
-        )
 
 
 def log_route_processing_error(
@@ -267,17 +229,18 @@ def log_route_processing_error(
     route_count: int | None = None,
 ) -> None:
     """
-    Log route processing error to both stdout and Sentry.
+    Log route processing error to stdout (automatically sent to Sentry as issue).
 
-    ERROR level events are sent to Sentry as issues.
-    Use this for route processing failures.
+    ERROR level logs are automatically captured by Sentry's LoggingIntegration
+    as issues. All structured log data is included in the Sentry event.
 
     Args:
         peer_ip: BMP peer IP address
         error_message: Error message
         route_count: Number of routes being processed (optional)
     """
-    # Always log to stdout via structlog
+    # Log to stdout via structlog
+    # LoggingIntegration automatically sends ERROR+ to Sentry as issues
     log_data: dict[str, Any] = {
         "peer_ip": peer_ip,
         "error": error_message,
@@ -287,18 +250,6 @@ def log_route_processing_error(
 
     logger.error("route_processing_error", **log_data)
 
-    # Send to Sentry as error issue (if enabled)
-    if _sentry_sdk:
-        extras: dict[str, Any] = {"peer_ip": peer_ip}
-        if route_count is not None:
-            extras["route_count"] = route_count
-
-        _sentry_sdk.capture_message(
-            f"Route processing error from {peer_ip}: {error_message}",
-            level="error",
-            extras=extras,
-        )
-
 
 def log_database_error(
     operation: str,
@@ -307,10 +258,10 @@ def log_database_error(
     row_count: int | None = None,
 ) -> None:
     """
-    Log database error to both stdout and Sentry.
+    Log database error to stdout (automatically sent to Sentry as critical issue).
 
-    FATAL level events are sent to Sentry as critical issues.
-    Use this for database failures that may require immediate attention.
+    ERROR level logs are automatically captured by Sentry's LoggingIntegration
+    as issues. All structured log data is included in the Sentry event.
 
     Args:
         operation: Database operation being performed
@@ -318,7 +269,8 @@ def log_database_error(
         table: Table name (optional)
         row_count: Number of rows being processed (optional)
     """
-    # Always log to stdout via structlog
+    # Log to stdout via structlog
+    # LoggingIntegration automatically sends ERROR+ to Sentry as issues
     log_data: dict[str, Any] = {
         "operation": operation,
         "error": error_message,
@@ -329,20 +281,6 @@ def log_database_error(
         log_data["row_count"] = row_count
 
     logger.error("database_error", **log_data)
-
-    # Send to Sentry as fatal issue (if enabled)
-    if _sentry_sdk:
-        extras: dict[str, Any] = {"operation": operation}
-        if table:
-            extras["table"] = table
-        if row_count is not None:
-            extras["row_count"] = row_count
-
-        _sentry_sdk.capture_message(
-            f"Database {operation} failed: {error_message}",
-            level="fatal",
-            extras=extras,
-        )
 
 
 def capture_parse_error(
