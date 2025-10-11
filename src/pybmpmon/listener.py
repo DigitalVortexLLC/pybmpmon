@@ -2,7 +2,8 @@
 
 import asyncio
 import time
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Any
 
 import asyncpg  # type: ignore[import-untyped]
 import structlog
@@ -295,6 +296,33 @@ class BMPListener:
                 msg_type=msg_type.name,
             )
 
+    def _extract_prefix_string(self, prefix: str | dict[str, Any]) -> str | None:
+        """
+        Extract prefix string from prefix (CIDR) or EVPN route dict.
+
+        Args:
+            prefix: Either a CIDR string or EVPN route info dict
+
+        Returns:
+            CIDR prefix string, or None for EVPN routes without IP
+        """
+        if isinstance(prefix, str):
+            # Traditional IPv4/IPv6 prefix
+            return prefix
+
+        # EVPN route dict
+        # For EVPN Type 2 (MAC/IP), use the IP address as prefix if available
+        ip_address = prefix.get("ip_address")
+        if ip_address:
+            # Create a /32 or /128 prefix from the IP
+            if ":" in ip_address:
+                return f"{ip_address}/128"  # IPv6
+            else:
+                return f"{ip_address}/32"  # IPv4
+
+        # No IP address in EVPN route - prefix will be NULL in database
+        return None
+
     async def _handle_route_monitoring(self, data: bytes, bmp_peer_ip: str) -> None:
         """
         Handle Route Monitoring message - parse BGP UPDATE and add to batch.
@@ -326,24 +354,41 @@ class BMPListener:
 
         # Process announced prefixes
         for prefix in bgp_update.prefixes:
+            # Extract prefix string (handles both CIDR and EVPN dicts)
+            prefix_str = self._extract_prefix_string(prefix)
+
+            # Extract EVPN-specific fields from route dict if applicable
+            evpn_route_type = bgp_update.evpn_route_type
+            evpn_rd = bgp_update.evpn_rd
+            evpn_esi = bgp_update.evpn_esi
+            mac_address = bgp_update.mac_address
+
+            # If prefix is an EVPN dict, extract per-route fields
+            if isinstance(prefix, dict):
+                evpn_route_type = prefix.get("route_type", evpn_route_type)
+                evpn_rd = prefix.get("rd", evpn_rd)
+                evpn_esi = prefix.get("esi", evpn_esi)
+                mac_address = prefix.get("mac_address", mac_address)
+
             route = RouteUpdate(
-                time=datetime.utcnow(),
+                time=datetime.now(UTC),
                 bmp_peer_ip=bmp_peer_ip,  # type: ignore[arg-type]
                 bmp_peer_asn=None,  # Will be populated from peer_header if needed
                 bgp_peer_ip=parsed.per_peer_header.peer_address,  # type: ignore[arg-type]
                 bgp_peer_asn=parsed.per_peer_header.peer_asn,
                 family=family,
-                prefix=prefix,
+                prefix=prefix_str,
                 next_hop=bgp_update.next_hop,  # type: ignore[arg-type]
                 as_path=bgp_update.as_path,
                 communities=bgp_update.communities,
+                extended_communities=bgp_update.extended_communities,
                 med=bgp_update.med,
                 local_pref=bgp_update.local_pref,
                 is_withdrawn=False,
-                evpn_route_type=bgp_update.evpn_route_type,
-                evpn_rd=bgp_update.evpn_rd,
-                evpn_esi=bgp_update.evpn_esi,
-                mac_address=bgp_update.mac_address,
+                evpn_route_type=evpn_route_type,
+                evpn_rd=evpn_rd,
+                evpn_esi=evpn_esi,
+                mac_address=mac_address,
             )
             await self.batch_writer.add_route(route)
             # Track processed route in stats
@@ -351,24 +396,41 @@ class BMPListener:
 
         # Process withdrawn prefixes
         for prefix in bgp_update.withdrawn_prefixes:
+            # Extract prefix string (handles both CIDR and EVPN dicts)
+            prefix_str = self._extract_prefix_string(prefix)
+
+            # Extract EVPN-specific fields from route dict if applicable
+            evpn_route_type = None
+            evpn_rd = None
+            evpn_esi = None
+            mac_address = None
+
+            # If prefix is an EVPN dict, extract per-route fields
+            if isinstance(prefix, dict):
+                evpn_route_type = prefix.get("route_type")
+                evpn_rd = prefix.get("rd")
+                evpn_esi = prefix.get("esi")
+                mac_address = prefix.get("mac_address")
+
             route = RouteUpdate(
-                time=datetime.utcnow(),
+                time=datetime.now(UTC),
                 bmp_peer_ip=bmp_peer_ip,  # type: ignore[arg-type]
                 bmp_peer_asn=None,
                 bgp_peer_ip=parsed.per_peer_header.peer_address,  # type: ignore[arg-type]
                 bgp_peer_asn=parsed.per_peer_header.peer_asn,
                 family=family,
-                prefix=prefix,
+                prefix=prefix_str,
                 next_hop=None,
                 as_path=None,
                 communities=None,
+                extended_communities=None,
                 med=None,
                 local_pref=None,
                 is_withdrawn=True,
-                evpn_route_type=None,
-                evpn_rd=None,
-                evpn_esi=None,
-                mac_address=None,
+                evpn_route_type=evpn_route_type,
+                evpn_rd=evpn_rd,
+                evpn_esi=evpn_esi,
+                mac_address=mac_address,
             )
             await self.batch_writer.add_route(route)
             # Track processed route in stats
@@ -388,15 +450,15 @@ class BMPListener:
         peer = BMPPeer(
             peer_ip=bmp_peer_ip,  # type: ignore[arg-type]
             router_id=None,  # Could extract from BGP OPEN if needed
-            first_seen=datetime.utcnow(),
-            last_seen=datetime.utcnow(),
+            first_seen=datetime.now(UTC),
+            last_seen=datetime.now(UTC),
             is_active=True,
         )
         await upsert_bmp_peer(self.pool, peer)
 
         # Insert peer event
         event = PeerEvent(
-            time=datetime.utcnow(),
+            time=datetime.now(UTC),
             peer_ip=bmp_peer_ip,  # type: ignore[arg-type]
             event_type="peer_up",
             reason_code=None,
@@ -432,7 +494,7 @@ class BMPListener:
 
         # Insert peer event
         event = PeerEvent(
-            time=datetime.utcnow(),
+            time=datetime.now(UTC),
             peer_ip=bmp_peer_ip,  # type: ignore[arg-type]
             event_type="peer_down",
             reason_code=parsed.reason,
@@ -485,7 +547,7 @@ class BMPListener:
         """
 
         async with self.pool.acquire() as conn:
-            await conn.execute(query, peer_ip, datetime.utcnow())
+            await conn.execute(query, peer_ip, datetime.now(UTC))
 
 
 async def run_listener(

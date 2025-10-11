@@ -2,7 +2,7 @@
 
 import asyncio
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 from pybmpmon.database.batch_writer import BatchWriter
@@ -22,6 +22,10 @@ async def test_batch_writer_throughput():
         async def copy_records_to_table(self, table, records, columns):
             # Simulate some processing time
             await asyncio.sleep(0.001)  # 1ms per batch
+
+        async def execute(self, query, *args):
+            # Mock execute for route state updates
+            pass
 
     class MockPoolContext:
         def __init__(self, conn):
@@ -51,7 +55,7 @@ async def test_batch_writer_throughput():
 
         for i in range(num_routes):
             route = RouteUpdate(
-                time=datetime.utcnow(),
+                time=datetime.now(UTC),
                 bmp_peer_ip=f"192.0.2.{i % 256}",
                 bmp_peer_asn=65000,
                 bgp_peer_ip=f"198.51.100.{i % 256}",
@@ -100,6 +104,10 @@ async def test_batch_writer_timeout_flush():
         async def copy_records_to_table(self, table, records, columns):
             self.pool.flush_count += 1
 
+        async def execute(self, query, *args):
+            # Mock execute for route state updates
+            pass
+
     class MockPoolContext:
         def __init__(self, conn):
             self.conn = conn
@@ -126,7 +134,7 @@ async def test_batch_writer_timeout_flush():
         # Add only 100 routes (less than batch size)
         for i in range(100):
             route = RouteUpdate(
-                time=datetime.utcnow(),
+                time=datetime.now(UTC),
                 bmp_peer_ip="192.0.2.1",
                 bgp_peer_ip="198.51.100.1",
                 family="ipv4_unicast",
@@ -156,6 +164,10 @@ async def test_batch_writer_size_flush():
         async def copy_records_to_table(self, table, records, columns):
             self.pool.flush_count += 1
 
+        async def execute(self, query, *args):
+            # Mock execute for route state updates
+            pass
+
     class MockPoolContext:
         def __init__(self, conn):
             self.conn = conn
@@ -182,7 +194,7 @@ async def test_batch_writer_size_flush():
         # Add exactly 100 routes (batch size)
         for i in range(100):
             route = RouteUpdate(
-                time=datetime.utcnow(),
+                time=datetime.now(UTC),
                 bmp_peer_ip="192.0.2.1",
                 bgp_peer_ip="198.51.100.1",
                 family="ipv4_unicast",

@@ -4,6 +4,7 @@ from typing import Final
 
 # Table names
 TABLE_ROUTE_UPDATES: Final[str] = "route_updates"
+TABLE_ROUTE_STATE: Final[str] = "route_state"
 TABLE_BMP_PEERS: Final[str] = "bmp_peers"
 TABLE_PEER_EVENTS: Final[str] = "peer_events"
 

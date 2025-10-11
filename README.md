@@ -52,6 +52,8 @@ pybmpmon is a high-performance BMP monitoring station that provides:
 
 ### Installation
 
+#### Option 1: With Local PostgreSQL (Recommended for Testing)
+
 ```bash
 # Clone repository
 git clone https://github.com/DigitalVortexLLC/pybmpmon.git
@@ -63,7 +65,32 @@ cp .env.example .env
 # Edit configuration (set database password!)
 vim .env
 
-# Start services
+# Start services with local PostgreSQL
+docker-compose --profile local-db up -d
+
+# View logs
+docker-compose logs -f pybmpmon
+```
+
+#### Option 2: With External PostgreSQL
+
+```bash
+# Clone repository
+git clone https://github.com/DigitalVortexLLC/pybmpmon.git
+cd pybmpmon
+
+# Copy configuration template
+cp .env.example .env
+
+# Edit configuration - set DB_HOST to your PostgreSQL server
+vim .env
+# Set: DB_HOST=your-postgres-server.example.com
+# Set: DB_PASSWORD=your-password
+
+# Disable local PostgreSQL dependency
+mv docker-compose.override.yml docker-compose.override.yml.disabled
+
+# Start only the application (no PostgreSQL container)
 docker-compose up -d
 
 # View logs
@@ -112,7 +139,11 @@ BMP_LISTEN_HOST=0.0.0.0
 BMP_LISTEN_PORT=11019
 
 # Database
+# For local PostgreSQL (in Docker):
 DB_HOST=postgres
+
+# For external PostgreSQL:
+# DB_HOST=your-postgres-server.example.com
 DB_PORT=5432
 DB_USER=bmpmon
 DB_PASSWORD=changeme  # Change this!
@@ -125,6 +156,8 @@ LOG_LEVEL=INFO  # DEBUG, INFO, WARNING, ERROR
 SENTRY_DSN=  # Leave empty to disable
 SENTRY_ENVIRONMENT=production
 ```
+
+**Using External PostgreSQL**: Set `DB_HOST` to your PostgreSQL server address and disable the local PostgreSQL dependency by renaming `docker-compose.override.yml` to `docker-compose.override.yml.disabled`.
 
 See [Configuration Guide](https://DigitalVortexLLC.github.io/pybmpmon/configuration/) for all options.
 

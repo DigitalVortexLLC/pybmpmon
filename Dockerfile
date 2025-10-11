@@ -1,32 +1,32 @@
-# Multi-stage build for pybmpmon
-FROM python:3.11-slim as builder
-
-# Install Poetry
-RUN pip install --no-cache-dir poetry==1.7.1
-
-WORKDIR /app
-
-# Copy dependency files
-COPY pyproject.toml ./
-
-# Install dependencies only (no dev dependencies for production)
-RUN poetry config virtualenvs.create false && \
-    poetry install --no-interaction --no-ansi --no-root --only main
-
-# Final stage
 FROM python:3.11-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
 RUN useradd -m -u 1000 -s /bin/bash bmpmon
 
 WORKDIR /app
 
-# Copy installed packages from builder
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
+# Install Poetry
+RUN pip install --no-cache-dir poetry==1.7.1
 
-# Copy application code
+# Copy dependency files and README (required by pyproject.toml)
+COPY pyproject.toml poetry.lock README.md ./
+
+# Install dependencies (as root for system packages)
+RUN poetry config virtualenvs.create false && \
+    poetry install --no-interaction --no-ansi --only main --no-root
+
+# Copy application source code
 COPY src/ ./src/
+
+# Install the pybmpmon package itself
+RUN poetry install --no-interaction --no-ansi --only-root
+
+# Copy env example
 COPY .env.example ./.env
 
 # Set ownership

@@ -2,7 +2,7 @@
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 
 import structlog
 
@@ -20,12 +20,12 @@ class PeerStats:
     ipv6_routes: int = 0
     evpn_routes: int = 0
     errors: int = 0
-    last_update: datetime = field(default_factory=datetime.utcnow)
+    last_update: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def increment_received(self) -> None:
         """Increment routes received counter."""
         self.routes_received += 1
-        self.last_update = datetime.utcnow()
+        self.last_update = datetime.now(UTC)
 
     def increment_processed(self, family: str) -> None:
         """
@@ -43,12 +43,12 @@ class PeerStats:
         elif family == "evpn":
             self.evpn_routes += 1
 
-        self.last_update = datetime.utcnow()
+        self.last_update = datetime.now(UTC)
 
     def increment_error(self) -> None:
         """Increment error counter."""
         self.errors += 1
-        self.last_update = datetime.utcnow()
+        self.last_update = datetime.now(UTC)
 
     def reset(self) -> None:
         """Reset all counters (for periodic reporting)."""
@@ -58,7 +58,7 @@ class PeerStats:
         self.ipv6_routes = 0
         self.evpn_routes = 0
         self.errors = 0
-        self.last_update = datetime.utcnow()
+        self.last_update = datetime.now(UTC)
 
 
 class StatisticsCollector:

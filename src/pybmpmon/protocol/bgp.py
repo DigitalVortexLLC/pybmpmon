@@ -1,7 +1,7 @@
 """BGP protocol definitions and message types per RFC4271 and RFC4760."""
 
 from enum import IntEnum
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 
 class BGPMessageType(IntEnum):
@@ -106,8 +106,9 @@ class ParsedBGPUpdate(NamedTuple):
     # Basic route information
     afi: int | None  # Address Family Identifier
     safi: int | None  # Subsequent Address Family Identifier
-    prefixes: list[str]  # List of prefixes (CIDR notation)
-    withdrawn_prefixes: list[str]  # List of withdrawn prefixes
+    # Prefixes can be strings (IPv4/IPv6 CIDR) or dicts (EVPN route info)
+    prefixes: list[str | dict[str, Any]]
+    withdrawn_prefixes: list[str | dict[str, Any]]
     is_withdrawal: bool  # True if this is a withdrawal
 
     # Path attributes
@@ -117,6 +118,7 @@ class ParsedBGPUpdate(NamedTuple):
     med: int | None
     local_pref: int | None
     communities: list[str] | None
+    extended_communities: list[str] | None
 
     # EVPN-specific
     evpn_route_type: int | None

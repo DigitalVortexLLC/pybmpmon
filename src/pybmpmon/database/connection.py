@@ -7,6 +7,38 @@ from pybmpmon.monitoring.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _encode_macaddr(value: str | bytes | None) -> bytes | None:
+    """Encode MAC address string to binary format for PostgreSQL MACADDR type."""
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value  # Already encoded
+    # PostgreSQL expects MAC address as 6 bytes
+    # Convert "08:00:2b:01:02:03" to bytes
+    parts = value.replace("-", ":").split(":")
+    return bytes(int(part, 16) for part in parts)
+
+
+def _decode_macaddr(value: bytes | None) -> str | None:
+    """Decode binary MACADDR from PostgreSQL to string format."""
+    if value is None:
+        return None
+    # Convert 6 bytes to "08:00:2b:01:02:03" format
+    return ":".join(f"{b:02x}" for b in value)
+
+
+async def _init_connection(conn: asyncpg.Connection) -> None:
+    """Initialize connection with custom type codecs."""
+    # Register MACADDR codec (OID 829) for binary protocol support
+    await conn.set_type_codec(
+        "macaddr",
+        encoder=_encode_macaddr,
+        decoder=_decode_macaddr,
+        schema="pg_catalog",
+        format="binary",
+    )
+
+
 class DatabasePool:
     """
     Manages asyncpg connection pool for database operations.
@@ -68,6 +100,7 @@ class DatabasePool:
                 max_size=max_size,
                 command_timeout=command_timeout,
                 timeout=timeout,
+                init=_init_connection,
             )
 
             # Test connection

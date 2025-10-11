@@ -1,6 +1,6 @@
 """Database CRUD operations for BMP peers and routes."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 import asyncpg  # type: ignore[import-untyped]
 
@@ -133,7 +133,7 @@ async def mark_peer_inactive(pool: asyncpg.Pool, peer_ip: str) -> None:
     """
 
     async with pool.acquire() as conn:
-        await conn.execute(query, peer_ip, datetime.utcnow())
+        await conn.execute(query, peer_ip, datetime.now(UTC))
 
 
 async def insert_peer_event(pool: asyncpg.Pool, event: PeerEvent) -> None:
