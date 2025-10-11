@@ -5,10 +5,11 @@ import functools
 import signal
 import sys
 
+import asyncpg  # type: ignore[import-untyped]
 import structlog
 
 from pybmpmon.config import settings
-from pybmpmon.database.migrations import initialize_database_schema
+from pybmpmon.database.migrations import apply_migrations
 from pybmpmon.listener import run_listener
 from pybmpmon.monitoring.logger import configure_logging
 
@@ -60,26 +61,38 @@ def main() -> None:
         # Setup signal handlers
         setup_signal_handlers(loop)
 
-        # Initialize database schema if needed
-        logger.info("initializing_database")
-        loop.run_until_complete(
-            initialize_database_schema(
+        # Create database connection pool
+        logger.info("creating_database_pool")
+        pool = loop.run_until_complete(
+            asyncpg.create_pool(
                 host=settings.db_host,
                 port=settings.db_port,
                 database=settings.db_name,
                 user=settings.db_user,
                 password=settings.db_password,
+                min_size=5,
+                max_size=10,
+                command_timeout=30.0,
             )
         )
 
+        # Apply database migrations
+        logger.info("checking_database_migrations")
+        loop.run_until_complete(apply_migrations(pool))
+
         # Run the listener
         try:
-            loop.run_until_complete(run_listener())
+            loop.run_until_complete(run_listener(pool=pool))
         except asyncio.CancelledError:
             logger.info("shutdown_initiated")
         except KeyboardInterrupt:
             logger.info("keyboard_interrupt")
         finally:
+            # Close database pool
+            if pool:
+                logger.info("closing_database_pool")
+                loop.run_until_complete(pool.close())
+
             # Cancel all remaining tasks
             pending = asyncio.all_tasks(loop)
             for task in pending:
