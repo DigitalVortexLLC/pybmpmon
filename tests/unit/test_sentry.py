@@ -53,7 +53,7 @@ class TestSentryInitialization:
             assert sentry_helper.is_sentry_enabled() is False
 
     def test_init_sentry_success(self, monkeypatch):
-        """Test successful Sentry initialization."""
+        """Test successful Sentry initialization with LoggingIntegration."""
         # Reset global state
         sentry_helper._sentry_enabled = False
         sentry_helper._sentry_sdk = None
@@ -70,11 +70,9 @@ class TestSentryInitialization:
 
         # Mock sentry_sdk at the import location
         mock_sentry = mock.MagicMock()
-        mock_sentry_logger = mock.MagicMock()
-        mock_logging_integration = mock.MagicMock()
-        mock_sentry.logger = mock_sentry_logger
-        mock_sentry.integrations.logging.LoggingIntegration = mock_logging_integration
-        mock_sentry.init = mock.MagicMock()
+        mock_logging_integration_class = mock.MagicMock()
+        mock_logging_integration_instance = mock.MagicMock()
+        mock_logging_integration_class.return_value = mock_logging_integration_instance
 
         with mock.patch.dict(
             "sys.modules",
@@ -82,7 +80,7 @@ class TestSentryInitialization:
                 "sentry_sdk": mock_sentry,
                 "sentry_sdk.integrations": mock.MagicMock(),
                 "sentry_sdk.integrations.logging": mock.MagicMock(
-                    LoggingIntegration=mock_logging_integration
+                    LoggingIntegration=mock_logging_integration_class
                 ),
             },
         ):
@@ -90,8 +88,17 @@ class TestSentryInitialization:
 
             assert result is True
             assert sentry_helper.is_sentry_enabled() is True
-            # The init should have been called
+
+            # Verify sentry_sdk.init was called
             assert mock_sentry.init.called
+
+            # Verify LoggingIntegration was created
+            mock_logging_integration_class.assert_called_once()
+
+            # Verify init was called with integrations parameter
+            call_kwargs = mock_sentry.init.call_args[1]
+            assert "integrations" in call_kwargs
+            assert mock_logging_integration_instance in call_kwargs["integrations"]
 
 
 class TestSentryDisabled:
@@ -137,7 +144,12 @@ class TestSentryDisabled:
 
 
 class TestSentryEnabled:
-    """Test Sentry helper functions when Sentry is enabled."""
+    """Test Sentry helper functions when Sentry is enabled.
+
+    Note: With LoggingIntegration, the helper functions just log to structlog.
+    Sentry automatically captures logs via LoggingIntegration, so we don't
+    test manual capture_message() or add_breadcrumb() calls here.
+    """
 
     def setup_method(self):
         """Setup mock Sentry SDK for these tests."""
@@ -156,109 +168,95 @@ class TestSentryEnabled:
         sentry_helper._sentry_logger = None
 
     def test_log_peer_up_event(self):
-        """Test logging peer up event to Sentry."""
+        """Test logging peer up event (captured automatically by LoggingIntegration)."""
+        # Should not raise any errors
         sentry_helper.log_peer_up_event(
             peer_ip="192.0.2.1",
             bgp_peer="192.0.2.100",
             bgp_peer_asn=65001,
         )
-
-        # Verify add_breadcrumb was called
-        self.mock_sentry.add_breadcrumb.assert_called_once()
-        call_args = self.mock_sentry.add_breadcrumb.call_args
-        # Check category and level
-        assert call_args[1]["category"] == "bmp.peer"
-        assert call_args[1]["level"] == "info"
-        # Check data
-        assert call_args[1]["data"]["peer_ip"] == "192.0.2.1"
-        assert call_args[1]["data"]["bgp_peer"] == "192.0.2.100"
-        assert call_args[1]["data"]["bgp_peer_asn"] == 65001
+        # Note: No assertions on Sentry SDK calls because LoggingIntegration
+        # handles this automatically via Python's logging module
 
     def test_log_peer_down_event(self):
-        """Test logging peer down event to Sentry."""
+        """
+        Test logging peer down event.
+
+        Captured automatically by LoggingIntegration.
+        """
+        # Should not raise any errors
         sentry_helper.log_peer_down_event(
             peer_ip="192.0.2.1",
             reason=1,
         )
-
-        # Verify capture_message was called
-        self.mock_sentry.capture_message.assert_called_once()
-        call_args = self.mock_sentry.capture_message.call_args
-        # Check message and level
-        assert "192.0.2.1" in call_args[0][0]
-        assert call_args[1]["level"] == "warning"
-        # Check extras
-        assert call_args[1]["extras"]["peer_ip"] == "192.0.2.1"
-        assert call_args[1]["extras"]["reason_code"] == 1
+        # Note: No assertions on Sentry SDK calls because LoggingIntegration
+        # handles this automatically via Python's logging module
 
     def test_log_parse_error(self):
-        """Test logging parse error to Sentry."""
+        """
+        Test logging parse error.
+
+        Captured automatically by LoggingIntegration.
+        """
+        # Should not raise any errors
         sentry_helper.log_parse_error(
             error_type="bmp_parse_error",
             peer_ip="192.0.2.1",
             error_message="Invalid BMP version",
             data_hex="0200000006",
         )
-
-        # Verify capture_message was called
-        self.mock_sentry.capture_message.assert_called_once()
-        call_args = self.mock_sentry.capture_message.call_args
-        # Check message and level
-        assert "bmp_parse_error" in call_args[0][0]
-        assert "192.0.2.1" in call_args[0][0]
-        assert call_args[1]["level"] == "error"
-        # Check extras
-        assert call_args[1]["extras"]["error_type"] == "bmp_parse_error"
-        assert call_args[1]["extras"]["peer_ip"] == "192.0.2.1"
-
-    def test_log_parse_error_truncates_hex_data(self):
-        """Test that hex data is truncated to 512 chars for Sentry."""
-        long_hex = "00" * 1000  # 2000 characters
-
-        sentry_helper.log_parse_error(
-            error_type="bmp_parse_error",
-            peer_ip="192.0.2.1",
-            error_message="Test error",
-            data_hex=long_hex,
-        )
-
-        # Verify truncation
-        call_args = self.mock_sentry.capture_message.call_args
-        assert len(call_args[1]["extras"]["data_hex"]) == 512
+        # Note: No assertions on Sentry SDK calls because LoggingIntegration
+        # handles this automatically via Python's logging module
 
     def test_log_route_processing_error(self):
-        """Test logging route processing error to Sentry."""
+        """
+        Test logging route processing error.
+
+        Captured automatically by LoggingIntegration.
+        """
+        # Should not raise any errors
         sentry_helper.log_route_processing_error(
             peer_ip="192.0.2.1",
             error_message="Failed to insert routes",
             route_count=1000,
         )
-
-        # Verify capture_message was called
-        self.mock_sentry.capture_message.assert_called_once()
-        call_args = self.mock_sentry.capture_message.call_args
-        assert "192.0.2.1" in call_args[0][0]
-        assert call_args[1]["level"] == "error"
-        assert call_args[1]["extras"]["peer_ip"] == "192.0.2.1"
-        assert call_args[1]["extras"]["route_count"] == 1000
+        # Note: No assertions on Sentry SDK calls because LoggingIntegration
+        # handles this automatically via Python's logging module
 
     def test_log_database_error(self):
-        """Test logging database error to Sentry."""
+        """
+        Test logging database error.
+
+        Captured automatically by LoggingIntegration.
+        """
+        # Should not raise any errors
         sentry_helper.log_database_error(
             operation="COPY",
             error_message="Connection lost",
             table="route_updates",
             row_count=1000,
         )
+        # Note: No assertions on Sentry SDK calls because LoggingIntegration
+        # handles this automatically via Python's logging module
 
-        # Verify capture_message was called
-        self.mock_sentry.capture_message.assert_called_once()
-        call_args = self.mock_sentry.capture_message.call_args
-        assert "COPY" in call_args[0][0]
-        assert call_args[1]["level"] == "fatal"
-        assert call_args[1]["extras"]["operation"] == "COPY"
-        assert call_args[1]["extras"]["table"] == "route_updates"
-        assert call_args[1]["extras"]["row_count"] == 1000
+    def test_capture_parse_error_with_exception(self):
+        """
+        Test capturing parse error with exception context.
+
+        Uses manual capture_exception.
+        """
+        test_exception = ValueError("Test error")
+
+        sentry_helper.capture_parse_error(
+            error_type="bmp_parse_error",
+            peer_ip="192.0.2.1",
+            error_message="Invalid BMP version",
+            data_hex="0200000006",
+            exception=test_exception,
+        )
+
+        # Verify capture_exception was called (manual SDK call)
+        self.mock_sentry.capture_exception.assert_called_once()
 
     def test_get_sentry_logger(self):
         """Test that get_sentry_logger returns None (deprecated)."""
