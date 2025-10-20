@@ -24,7 +24,7 @@ black = "^25.9"
 ruff = "^0.3"
 mypy = "^1.8"
 mkdocs = "^1.5"
-mkdocs-material = "^9.5"
+mkdocs-material = "^9.6"
 
 [tool.poetry.scripts]
 pybmpmon = "pybmpmon.__main__:main"
